@@ -14,6 +14,7 @@
 #include <type_traits>
 
 namespace smbd {
+void trace_ui_draw(struct Cpu&,class Memory&);
 extern "C" {
 std::uint32_t smbd_exchange8(void*,std::uint32_t);
 std::uint32_t smbd_exchange16(void*,std::uint32_t);

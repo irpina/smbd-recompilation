@@ -14,6 +14,11 @@ bool equal_name(std::string_view a, std::string_view b) {
         return std::tolower(x) == std::tolower(y);
     });
 }
+bool less_name(std::string_view a,std::string_view b) {
+    return std::lexicographical_compare(a.begin(),a.end(),b.begin(),b.end(),[](unsigned char x,unsigned char y) {
+        return std::tolower(x)<std::tolower(y);
+    });
+}
 }
 
 Disc::Disc(const std::filesystem::path& path) : file_(path) {
@@ -27,9 +32,11 @@ Disc::Disc(const std::filesystem::path& path) : file_(path) {
     file_.check(root_.sector * sector_size, root_.size);
 }
 
-std::vector<DiscEntry> Disc::directory(const DiscEntry& entry) {
+const std::vector<DiscEntry>& Disc::directory(const DiscEntry& entry) {
     if (!entry.directory()) throw std::runtime_error("Path is not a directory");
-    if (!entry.size) return {};
+    if (!entry.size) {static const std::vector<DiscEntry> empty;return empty;}
+    const auto key=(std::uint64_t(entry.sector)<<32)|entry.size;
+    if(const auto found=directories_.find(key);found!=directories_.end()) return found->second;
     // Child offsets are 16-bit multiples of four; read nodes, not the disc image.
     if (entry.size > 1024 * 1024) throw std::runtime_error("Directory exceeds 1 MiB inspection limit");
     const auto table = file_.read(entry.sector * sector_size, entry.size);
@@ -58,13 +65,19 @@ std::vector<DiscEntry> Disc::directory(const DiscEntry& entry) {
         if (right) pending.push_back(static_cast<std::uint32_t>(right) * 4);
         if (left) pending.push_back(static_cast<std::uint32_t>(left) * 4);
     }
-    std::ranges::sort(entries, [](const auto& a, const auto& b) {
-        return std::lexicographical_compare(a.name.begin(), a.name.end(), b.name.begin(), b.name.end(),
-            [](unsigned char x, unsigned char y) { return std::tolower(x) < std::tolower(y); });
-    });
+    std::ranges::sort(entries,[](const auto& a,const auto& b) {return less_name(a.name,b.name);});
     for (std::size_t i = 1; i < entries.size(); ++i)
         if (equal_name(entries[i - 1].name, entries[i].name)) throw std::runtime_error("Duplicate directory filename");
-    return entries;
+    // The mounted image is immutable. Rebuilding and sorting these tables for
+    // every file open dominated boot time. Bound retained metadata to 16 MiB;
+    // uncached directories still use the same validated lookup path.
+    auto bytes=entries.capacity()*sizeof(DiscEntry);
+    for(const auto& item:entries) bytes+=item.name.capacity()+1;
+    if(directories_.size()<1024 && bytes<=16*1024*1024-directory_bytes_) {
+        directory_bytes_+=bytes;
+        return directories_.emplace(key,std::move(entries)).first->second;
+    }
+    uncached_directory_=std::move(entries);return uncached_directory_;
 }
 
 std::optional<DiscEntry> Disc::lookup(std::string_view path) {
@@ -74,9 +87,9 @@ std::optional<DiscEntry> Disc::lookup(std::string_view path) {
         const auto end = path.find_first_of("/\\", start);
         const auto part = path.substr(start, end == std::string_view::npos ? path.size() - start : end - start);
         if (part.empty() || part == "." || part == "..") throw std::runtime_error("Invalid disc path component");
-        const auto entries = directory(entry);
-        const auto match = std::ranges::find_if(entries, [&](const auto& item) { return equal_name(item.name, part); });
-        if (match == entries.end()) return std::nullopt;
+        const auto& entries = directory(entry);
+        const auto match=std::lower_bound(entries.begin(),entries.end(),part,[](const auto& item,std::string_view name) {return less_name(item.name,name);});
+        if (match == entries.end() || !equal_name(match->name,part)) return std::nullopt;
         entry = *match;
         if (end == std::string_view::npos) break;
         if (!entry.directory()) return std::nullopt;

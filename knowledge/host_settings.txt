@@ -172,3 +172,89 @@ The unattended title demo separately reaches unresolved original actor call
 attract-missing-call*.json and is not hidden by the settings implementation.
 Normal interactive runtime failures return a clear Diagnostics page with an
 original-state report; scripted diagnostics retain their failure exit code.
+
+Dialog dimming backdrop (2026-10-30, supported executable SHA-256
+9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2):
+1DD10 renders storage dialogs; 1DDBA passes the static sprite at 482FB8 to
+75400. The verified descriptor uses solid 8x8 sprite 60, centre (320,240),
+depth 1, scale (80,60). Capture frame-1793405530285-173875180800 draw 509
+therefore spans x=0..640, y=0..480 although its native widescreen canvas is
+853.333 pixels wide. The descriptor is sized to the selected canvas.
+Frame-1793408098023-104637922100 draw 536 exposed the remaining pixel-origin
+gap. Its viewport constant k59=(320.53125,240.53125); the translated vertex
+epilogue snaps coordinates to 1/16 pixel and subtracts a 1/32 raster bias.
+The full-screen sprite centre is (319.5,239.5), with bounds rounded outward
+by half that subpixel grid at each edge. This covers the complete viewport
+with high-resolution MSAA, without changing dialog geometry, depth or fading.
+At 2x resolution, corrected draw replay checks all 4,480 perimeter pixels
+with AA off and MSAA 2x/4x/8x: expected 80% dimming, maximum RGB error 1.
+The replay derivation is explicit in build/checks/overlay-startup/aligned-capture.
+D3D pixel-origin reference:
+https://learn.microsoft.com/en-us/windows/win32/direct3d9/directly-mapping-texels-to-pixels
+
+Menu background dimming (2026-10-31, same verified executable):
+Capture frame-1793462845968-47304244100 draw 145 is the full-screen image
+effect from 2B9DD0, not the storage-dialog sprite. It copies the viewport,
+applies the FF808080 tint and draws a perspective quad at z=-10000.
+317F0 supplies its projection; 2B9F99..2BA020 computes the four bounds.
+The viewport offset k59=(320.53125,240.53125), followed by the shared
+1/16-pixel rounding and 1/32 raster bias, leaves the quad about half a
+native pixel inside the top and left edges. Higher resolution exposes it.
+
+The AOT lowering at verified call 2BA026 corrects those four stored bounds
+before 31200 starts the quad. It shifts the rectangle up/left by half a
+viewport pixel and expands each edge by one 1/16-pixel grid step, using
+the viewport dimensions already saved at 722FE4/722FE8. This keeps the
+shared renderer's coordinates, other geometry, texture and tint intact.
+
+Validation is in build/checks/menu-overlay. The original 2x/MSAA4 white
+underlay replay leaves 2239 of 4476 perimeter pixels incorrectly dimmed.
+The corrected rectangle passes all perimeter pixels at 1x/2x/4x with AA
+off and MSAA2/4/8: 12 cases, 62672 pixel checks, maximum RGB error zero.
+A fresh hidden, muted Main Game Select run produces byte-identical quad
+vertices to corrected-capture (live draw 171 versus original draw 145).
+Its 445-draw replay has no D3D11 errors; 73 RGB pixels differ from the live
+capture, so this is not a claim of bit-exact full-frame replay. Both native
+executables build successfully with three compiler/linker workers.
+
+Transition fade coverage (2026-10-31, same verified executable):
+Capture frame-1793467501945-273872341700 draw 369 is the final black fade
+sprite from 76E80. Verified call 76FB9 (E842E4FFFF) passes its descriptor
+to 75400: solid 8x8 sprite 60, centre (320,240), scale (128,60). Its quad
+spans x=-192..832 and y=0..480. The same viewport pixel-origin offset
+leaves the top row exposed; horizontal bounds already cover the screen.
+The AOT lowering corrects this full-screen descriptor before the call:
+centre Y minus 0.5, scale Y plus 1/128. Resulting vertical bounds are
+-0.53125..479.53125, including the outward subpixel margin for MSAA.
+The original opacity, tint, depth, fade timing and stencil openings remain.
+
+Validation is in build/checks/transition-overlay. The unmodified 370-draw
+replay exactly matches the capture. A native CPU probe of 76E80 from its
+captured state emits the original quad byte-for-byte before the fix;
+afterwards, only the four Y coordinates differ in its 220-byte GPU packet.
+Replaying those new native vertices changes exactly the 1280 top-row
+pixels, with no changes below that row and no D3D11 errors. Perimeter
+checks at 1x/2x/4x with AA off and MSAA2/4/8 pass all 62672 pixels across
+12 cases. Both native executables build with three compiler/linker workers.
+This validation uses native CPU execution and offscreen replay, not a new
+interactive game capture. Original capture files are preserved.
+
+Startup profiling (2026-10-30, same verified executable): Ryzen 5 5600X,
+GeForce RTX 5060 Ti, 1x, 16:9, AA off, AF16, V-sync off, 360 Hz cap; hidden
+and muted. Baseline game-request to first frame: 5.495 seconds. Boot profiling
+with --performance-at 0 attributed 5,278.826 ms to 6,860 NtCreateFile calls.
+Disc::lookup rebuilt, validated and sorted the same immutable directory tables
+for each open, then linearly searched them. Retain validated tables (16 MiB,
+at most 1,024 directories, with an uncached fallback), return references during
+lookup, and binary-search the sorted case-insensitive names. Sharing checks
+also repeatedly allocated/folded every existing file name; opened disc files
+now retain their immutable comparison key. Validation and sharing rules stay
+unchanged. Final NtCreateFile time: 242.235 ms for the same 6,860 calls.
+Game request to first frame: 422 ms; process launch to first frame: 971 ms.
+The real restart path (--restart-at 120 --frames 121) measured 1,041 ms from
+restart request through teardown/recreation to the next first frame.
+Artifacts: build/checks/overlay-startup/{boot-profile,delivery-profile},
+delivery-phases.jsonl and restart-phases.jsonl. --report emits opt-in startup
+phases; --performance-at 0 includes initialization in the existing recorder.
+The first partial frame is excluded from gameplay percentiles, so inspect
+its raw phase times and hot-operation totals when diagnosing startup.

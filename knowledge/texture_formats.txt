@@ -91,3 +91,71 @@ Artifacts: build/checks/texture-reuse/current-textures, native-capture and
 native-replay. Reports: build/logs/texture-cache-check.json and
 build/logs/texture-reuse-validation.json. These checks do not establish complete
 gameplay, visual-parity or performance acceptance.
+
+World 4 bump mapping - 2026-10-31
+XBE SHA256: 9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2
+The user's game-stopped-1793464277458.json stops at SDK submission 320B00
+with texture shader mode 06 unsupported. This is BUMPENVMAP, a dependent
+texture lookup, rather than an unresolved CPU call or failed allocation.
+
+The shared GPU state decoder now reads the four matrix words at
+1B28 + stage*40, ordered M00/M01/M10/M11. Mode 06 takes the earlier
+stage's blue/green channels as signed byte offsets, transforms them by
+the matrix, then offsets this stage's unprojected texture coordinates.
+Matrix offsets for linear textures are normalized by the image dimensions
+along with the existing vertex texture coordinates. Matrix values remain
+per-draw uniforms; shader compilation stays entirely in the native build.
+Stage zero and forward/self dependencies remain invalid.
+
+The focused native check-bump-mapping diagnostic draws a known 8x8 color
+grid through the same register decoder and renderer. Eight GPU checks pass:
+zero, positive, negative and off-diagonal matrices; linear texture units;
+stage 2/3 source selection; and a disabled source. Texture q=2 distinguishes
+the required unprojected lookup from PROJECT2D. Expected texels are fixed
+independently of the shader calculation. RTX 5060 Ti, no D3D11 errors.
+Results and reproduction inputs: build/checks/world4-bump.
+
+Primary references for mode numbers, register layout and lookup semantics:
+https://raw.githubusercontent.com/XboxDev/nxdk/master/lib/pbkit/nv_regs.h
+https://raw.githubusercontent.com/xemu-project/xemu/master/hw/xbox/nv2a/pgraph/psh_regs.h
+https://raw.githubusercontent.com/xemu-project/xemu/master/hw/xbox/nv2a/pgraph/glsl/psh.c
+https://registry.khronos.org/OpenGL/extensions/NV/NV_texture_shader.txt
+https://learn.microsoft.com/en-us/windows/win32/direct3d9/bump-mapping-formulas
+
+World 4 Gaussian filtering - 2026-10-31
+Same verified XBE SHA256 as above. game-stopped-1793465577498.json reached
+"Unsupported texture filter" after the bump lookup was implemented. Adding
+the stage, raw filter and decoded fields to that error allowed the user's
+next run, game-stopped-1793466043888.json, to identify the exact state:
+stage 1, filter 04074000, minification 7, magnification 4, texture shader 6.
+The NV2A register definitions identify minification 7 as CONVOLUTION_2D_LOD0
+and kernel bits 15:13 = 2 as GAUSSIAN_3. The magnification convolution code
+is 4. The old native sampler decoder accepted only min 1..6 and mag 1..2.
+
+This verified filter combination now uses a native HLSL 3x3 convolution:
+[1 2 1; 2 4 2; 1 2 1] / 16, sampled at LOD zero after the dependent lookup.
+Individual taps interpolate linearly and retain the stage's address modes.
+Anisotropy cannot replace this kernel. Upscaled render targets retain offsets
+of one guest texel, and the simple combiner uses the same sampling function.
+Other unsupported combinations still report the exact stage and filter word.
+
+The existing bump diagnostic also uses the observed 04074000 state with a
+single white texel on black. Fixed expectations check center/edge/corner
+weights, support, fractional coordinates, anisotropy, the bump offset, the
+ordinary linear path and the simple combiner. Artifacts: build/checks/world4-filter.
+These component checks do not establish bit-exact NV2A interpolation or full
+original-Xbox visual parity.
+
+Validation on RTX 5060 Ti: all 16 bump/Gaussian checks pass with exact expected
+RGB values and no D3D11 errors. The 379-draw menu capture
+frame-1793462845968-47304244100 replays with the same 39 changed pixels as
+before this change, with MSAA 4x, anisotropy 16 and no D3D11 errors. Both native
+executables rebuild successfully using three compiler/linker workers; the
+verified offline shader bank is embedded and unresolved calls remain zero.
+The user then manually confirmed that World 4 loads successfully with this build.
+
+Primary register definitions and magnification mapping:
+https://raw.githubusercontent.com/xemu-project/xemu/master/hw/xbox/nv2a/nv2a_regs.h
+https://raw.githubusercontent.com/xemu-project/xemu/master/hw/xbox/nv2a/pgraph/gl/constants.h
+Independent reference for the normalized 3x3 Gaussian kernel (not an NV2A spec):
+https://registry.khronos.org/OpenVX/specs/1.2.1/OpenVX_Specification_1_2_1.html#_gaussian_filter

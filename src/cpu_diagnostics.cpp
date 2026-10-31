@@ -11,9 +11,12 @@
 namespace smbd {
 double frame_gain_double(FloatingState&,double);
 // Recipes contain reset, reg NAME WORD, xmm INDEX WORD WORD WORD WORD,
-// write32 ADDRESS WORD, load ADDRESS FILE, call ENTRY CHECKPOINT_LIMIT STACK [ARG...], and
+// write32 ADDRESS WORD, step DELTA_BITS PHASE_BITS LOGIC, load ADDRESS FILE,
+// call ENTRY CHECKPOINT_LIMIT STACK [ARG...], and
 // read ADDRESS BYTES. Calls execute only the verified AOT registry.
 std::string probe_cpu(Xbe& image,const std::filesystem::path& capture,const std::filesystem::path& recipe) {
+    struct Restore {FrameStep saved=frame_step;~Restore(){frame_step=saved;}} restore;
+    frame_step={};
     if(!image.supported()) throw std::runtime_error("CPU probes require the supported executable");
     for(const auto& function:compiled_batch)
         if(function.source_sha256!=image.sha256) throw std::runtime_error("Compiled code belongs to another executable");
@@ -49,7 +52,13 @@ std::string probe_cpu(Xbe& image,const std::filesystem::path& capture,const std:
             std::istringstream words(line);std::string command;words>>command;
             if(command.empty() || command.starts_with('#')) continue;
             const auto next=[&] {std::string text;if(!(words>>text)) throw std::runtime_error("Missing CPU probe operand");return number(text);};
-            if(command=="reset") {std::memcpy(storage.data(),original.data(),storage.size());cpu=Cpu{};}
+            if(command=="reset") {std::memcpy(storage.data(),original.data(),storage.size());cpu=Cpu{};frame_step={};}
+            else if(command=="step") {
+                const auto delta=std::bit_cast<float>(next()),phase=std::bit_cast<float>(next());const auto logic=next();
+                if(!std::isfinite(delta) || delta<=0 || delta>2 || !std::isfinite(phase) || phase<0 || phase>=1 || logic>1)
+                    throw std::runtime_error("Invalid CPU probe timestep");
+                frame_step={delta,phase,logic!=0};
+            }
             else if(command=="reg") {
                 std::string name;words>>name;const auto value=next();
                 constexpr std::string_view names[]={"eax","ecx","edx","ebx","esp","ebp","esi","edi"};
@@ -283,9 +292,41 @@ std::string check_cpu(Xbe& image) {
             run(0x7B320,{data,1},true);
             const auto relative=std::bit_cast<float>(memory.load<std::uint32_t>(data+0x1C));
             require(std::isfinite(relative) && std::abs(relative+1)<0.00001f,"Platform-relative speed depends on refresh rate");
-            run(0x7B320,{data,0},true);
+            memory.store<std::uint32_t>(0x892118,0);
+            memory.store<std::uint32_t>(0x730058,0);
+            run(0x7E300,{data,data+0x1800},true);
             const auto world=std::bit_cast<float>(memory.load<std::uint32_t>(data+0x1C));
             require(std::isfinite(world) && std::abs(world)<0.00001f,"Platform transform changed world speed");
+            // The main collision routine has its own return-to-world conversion.
+            // Exercise a rotating surface as well as translation through that path.
+            std::memset(memory.access(data,0x100),0,0x100);
+            const float angle=0.01f*frame_step.delta,c=std::cos(angle),s=std::sin(angle);
+            store(group+0x30,c);store(group+0x38,-s);store(group+0x50,s);store(group+0x58,c);
+            store(data+4,3);store(data+0xC,7);store(data+0x10,3);store(data+0x18,7);
+            store(data+0x1C,0.04f);store(data+0x24,0.02f);
+            run(0x7B320,{data,1},true);
+            run(0x7E300,{data,data+0x1800},true);
+            require(std::abs(std::bit_cast<float>(memory.load<std::uint32_t>(data+0x1C))-0.04f)<0.0001f &&
+                std::abs(std::bit_cast<float>(memory.load<std::uint32_t>(data+0x24))-0.02f)<0.0001f,
+                "Rotating platform changed world speed");
+        }
+    });
+    check("stage group clocks and integer rotation retain fractional time",0x0007F520,[&] {
+        struct Restore {FrameStep saved=frame_step;~Restore(){frame_step=saved;}} restore;
+        for(const unsigned rate:{60,75,120,144,165,240,360,1000}) for(const int speed:{-512,-1,0,1,257,1024}) {
+            FrameCounter clock;std::uint32_t count=0;std::int32_t angle=0;double phase=0;
+            frame_step={};clock.sample(0,0);
+            for(unsigned frame=0;frame<rate*2;++frame) {
+                phase+=60.0/rate;const bool tick=phase>=1-1e-9;if(tick) {phase=std::max(0.0,phase-1);count+=speed;}
+                frame_step={60.0f/rate,static_cast<float>(phase),tick};
+                clock.sample(count,speed);angle+=frame_integer_increment(speed);
+            }
+            require(std::abs(clock.value-120.0*speed)<0.01,"Stage group clock depends on rendering rate");
+            require(std::abs(angle-120*speed)<=1,"Integer animation lost its fractional rotation");
+            const auto paused=clock.value;
+            for(unsigned frame=0;frame<rate;++frame) clock.sample(count,0);
+            require(clock.value==paused,"Paused group animation advanced");
+            require(clock.sample(12345,0)==12345,"External group clock reset was ignored");
         }
     });
     check("original primary and secondary goal query ABIs and sweeps",0x00012F30,[&] {

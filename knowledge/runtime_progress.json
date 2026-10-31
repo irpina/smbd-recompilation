@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "executable_sha256": "9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2",
-  "validation_date": "2026-10-30",
+  "validation_date": "2026-10-31",
   "stage": "Playable Windows prototype; Composition benchmark validated, 360 Hz target unmet",
   "original_translation_blockers": {
     "rejected_data_entries": 4,
@@ -11,13 +11,17 @@
   "native_generation": {
     "functions": 10628,
     "compiled": 10628,
-    "closed_functions": 10577,
+    "closed_functions": 10628,
     "native_platform_functions": 33,
-    "unresolved_indirect_sites": 3,
+    "unresolved_indirect_sites": 0,
     "unresolved_report_consistent": true,
-    "compiled_instructions": 908215,
+    "compiled_instructions": 908579,
     "unsupported_instructions": 0,
-    "discovered_instructions": 909470
+    "discovered_instructions": 909834,
+    "game_reachability_closed": true,
+    "diagnostic_only_indirect_sites": [
+      "0x0030FAB1"
+    ]
   },
   "shaders": {
     "builtin_programs": 25,
@@ -43,16 +47,18 @@
   },
   "evidence": "Initial coverage is retained as a historical snapshot. Current detailed reports stay private under build/logs and build/generated. Code/data exclusions and API/callback contracts are recorded separately in knowledge.",
   "diagnostics": {
-    "cpu_cases": 19,
+    "cpu_cases": 20,
     "cpu_failures": 0,
     "controller_cases": 47,
     "audio_mixer_cases": 37,
     "native_game_virtual_controller": true,
     "generation_functions": 10628,
-    "unresolved_indirect_sites": 3,
+    "unresolved_indirect_sites": 0,
     "graphics_cases": 15,
-    "current_cpu_report": "build/checks/performance-composition/lookup-cpu.json",
-    "current_graphics_report": "build/checks/performance-composition/lookup-gpu.json"
+    "current_cpu_report": "build/logs/remaining-calls/cpu-check.json",
+    "current_graphics_report": "build/checks/performance-composition/lookup-gpu.json",
+    "replay_cases": 14,
+    "current_replay_report": "build/logs/remaining-calls/replay-check.json"
   },
   "performance_validation": {
     "scene": "Practice / AIAI / Story World 2 / 3 Composition",
@@ -404,36 +410,33 @@
     "verified_report": "build/logs/game-0047.json"
   },
   "handoff": {
-    "user_requested_wrap_up_after_current_batch": true,
+    "user_requested_wrap_up_after_current_batch": false,
     "playable_phase_complete": true,
     "full_recompilation_complete": false,
-    "remaining_unresolved_calls": 3,
+    "remaining_unresolved_calls": 0,
     "xbox_service_coverage_complete": false,
     "manual_launcher": "Play.cmd",
     "manual_guide": "PLAYTEST.txt",
     "muted_by_default": true,
     "launcher_verified_from_another_directory": true,
     "current_batch_complete": true,
-    "recovery_and_performance_paused_by_user": true,
-    "resume": "build/logs/call-agents/wrapup-handoff.json"
+    "resume": "build/logs/remaining-calls/closure-audit.json",
+    "call_recovery_complete": true,
+    "performance_paused_by_user": true
   },
   "call_recovery": {
     "started_with": 141,
-    "remaining": 3,
-    "verified_closures": 138,
+    "remaining": 0,
+    "verified_closures": 141,
     "newly_discovered_unresolved_sites": 0,
-    "net_sites_reduced": 138,
+    "net_sites_reduced": 141,
     "coverage_regressions": 0,
     "functions": 10628,
     "game_relinked_for_recovery": true,
-    "game_generation_unresolved_sites": 3,
-    "status": "paused",
-    "remaining_sites": [
-      "0x001E9798",
-      "0x001EE1DA",
-      "0x0030FAB1"
-    ],
-    "report": "build/logs/call-agents/audit-wrapup.json",
+    "game_generation_unresolved_sites": 0,
+    "status": "complete",
+    "remaining_sites": [],
+    "report": "build/logs/remaining-calls/closure-audit.json",
     "game_report": "build/logs/call-agents/wrapup-rendered-smoke-report.json",
     "scope": "Current recovery audit starts at141 sites. Earlier170-site snapshot is retained below.",
     "historical_snapshot_at_170": {
@@ -471,6 +474,10 @@
         "remaining_before_away_goal": 284
       },
       "away_resume": "build/logs/call-workflow/away-resume170.json"
-    }
+    },
+    "prior_report": "build/logs/call-agents/audit-wrapup.json",
+    "game_build_report": "build/logs/remaining-calls/game-build.log",
+    "game_report_scope": "Historical rendered smoke; current call recovery was validated with native CPU/replay probes, with manual visual checking left to the user.",
+    "replay_bounds_correction": "knowledge/tennis_call_recovery.txt"
   }
 }

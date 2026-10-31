@@ -654,6 +654,16 @@
   ],
   "tables": [
     {
+      "site": "0x001E9798",
+      "proof_address": "0x001E9780",
+      "prefix": "8B4424088B5054",
+      "start": "0x005F2D98",
+      "end": "0x005F2E14",
+      "stride": 4,
+      "kind": "jump",
+      "evidence": "Verified private Tennis state domain 0..30; see knowledge/tennis_call_recovery.txt. Constructor 1ED2B0 clears the private bank. All 32 original 1EDDD0 callers supply 0..27; 1EE420/1EE490 supply 0/4, and 1EE440 supplies 28..30 from master+270 in 0..2. The latter follows menu byte 8B2532 in 0..2, the zero writer, and nonnegative modulo-three rotation. Primary command kinds 2/3 supply 0 or 4/8. Restoring captured private records preserves this domain. The recompiled fade now retains the last captured slot in nonfull histories when original 1EB0C0 reports the end; full circular histories and normal playback retain their original advancement. This removes dependence on an unproved 61/51-frame minimum. The table contains exactly 31 original words, including all six distinct methods; immutable table and receiver/writer evidence is tied to the executable hash."
+    },
+    {
       "site": "0x00126D4F",
       "proof_address": "0x00126D40",
       "prefix": "8B4424040FBE885401000089442404FF248D789C5800",
@@ -2552,6 +2562,49 @@
     }
   ],
   "groups": [
+    {
+      "slot": "0x00000000",
+      "prefix": "FF5630",
+      "kind": "call",
+      "target_literals": [
+        "0x005F41F8",
+        "0x005F4210",
+        "0x005F4228",
+        "0x005F4240",
+        "0x005F4258",
+        "0x005F4270",
+        "0x005F42A0",
+        "0x005F42B8",
+        "0x005F42E8",
+        "0x005F4318",
+        "0x005F4348",
+        "0x005F4378",
+        "0x005F43A8",
+        "0x005F43D8",
+        "0x005F4408",
+        "0x005F4438",
+        "0x005F4468",
+        "0x005F4498",
+        "0x005F44B0",
+        "0x005F44C8",
+        "0x005F44F8",
+        "0x005F4510",
+        "0x005F4528",
+        "0x005F4558",
+        "0x005F4570",
+        "0x005F4588",
+        "0x005F45A0",
+        "0x005F45B8",
+        "0x005F45D0",
+        "0x005F45E8",
+        "0x005F4600",
+        "0x005F4618"
+      ],
+      "sites": [
+        "0x001EE1DA"
+      ],
+      "evidence": "Verified primary Tennis callback field +30 on the private 28C-byte records; see knowledge/tennis_call_recovery.txt. The complete state 0..30 descriptor bank 5F4620..5F4CE7 points into the 45 original 24-byte commands 5F41E8..5F461F. Cursor starts at zero, advances one row, or resets on state change. The immediately following kind 5F41E8 is greater than 8 and cannot advance or publish a callback, so scanning cannot escape the pool. Only the 32 kind-zero command rows publish their +10 words through 1EDFC0 at 1EE044/4C: 22 distinct original callbacks. The constructor supplies zero, tested before calling; 1EB2C0 only preserves prior state. The complete master/private/child receiver and scalar/bulk-writer audit excludes unrelated +30 fields. Replay restore copies only initialized records after the narrowly scoped nonfull fade-end correction in the recompiler; no minimum rally-duration or pose-bound assumption is used."
+    },
     {
       "evidence": "These are the primary stream record's error callback at+38, not another object's similarly numbered field. Original constructor2D2890 installs interface6C0BA0 at2D28F8, default error handler2D23B0 at2D290B, and the record itself as callback data+3C. Reset2D2A30 and the complete original stream operations preserve these two fields. The only replacement writer is2D29E0, the interface's+2C method at6C0BCC. Complete original literal/relative/interior inventory of2D29E0..2D2A30 finds only that interface word;235C32 is an overlapping CALL238960 opcode/displacement, not a pointer publication. The original indexed instruction inventory has only three direct+2C calls:2CD52D/2CDDDC use their independently resolved other interfaces;2DB0AE calls a separate manager callback returned by2D9BE0. No resolved original method target or remaining method/loaded+2C path invokes this stream setter. Thus original stream instances retain2D23B0 for their live lifetime. The default is the original diagnostic handler (push45EB84;call2E2DB0;ret), preserving its actual behavior and callback arguments. All four consumers operate on this same constructor's primary records; the77080/2D0590 fields and other stream classes are excluded.",
       "prefix": "FFD1",

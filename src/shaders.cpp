@@ -29,6 +29,8 @@ struct P {float4 p:SV_Position;float4 c:COLOR0;float4 s:COLOR1;
 cbuffer Factors:register(b0) {
  float4 factor0[8];float4 factor1[8];float4 final0;float4 final1;float4 fog;float4 alpha;
  uint4 combiners[8];uint4 stages[4];uint4 controls;
+ float4 bump_matrices[4];
+ uint4 gaussian_scale;
 };
 SamplerState sm0:register(s0);SamplerState sm1:register(s1);SamplerState sm2:register(s2);SamplerState sm3:register(s3);
 Texture2D tx0:register(t0);Texture2D tx1:register(t1);Texture2D tx2:register(t2);Texture2D tx3:register(t3);
@@ -39,6 +41,17 @@ float4 finish(float4 result) {
  bool accepted=func==0x207 || (func==0x201 && a<alpha.x) || (func==0x202 && a==alpha.x) ||
   (func==0x203 && a<=alpha.x) || (func==0x204 && a>alpha.x) || (func==0x205 && a!=alpha.x) || (func==0x206 && a>=alpha.x);
  if(!accepted) discard;return result;
+}
+float4 sample2d(Texture2D image,SamplerState sm,float2 uv,uint scale) {
+ if(!scale) return image.Sample(sm,uv);
+ uint width,height;image.GetDimensions(width,height);
+ float2 texel=float(scale)/float2(width,height);float4 value=0;
+ // Separable 3x3 Gaussian: [1 2 1] in each axis, normalized by 16.
+ [unroll] for(int y=-1;y<=1;++y) {
+  [unroll] for(int x=-1;x<=1;++x)
+   value+=image.SampleLevel(sm,uv+float2(x,y)*texel,0)*(x==0?2:1)*(y==0?2:1);
+ }
+ return value/16;
 }
 struct R {float4 fog,c,s,t0,t1,t2,t3,r0,r1,sum,ef;};
 float4 mapped(float4 v,uint word) {
@@ -92,11 +105,15 @@ void write_alpha(inout R r,uint destination,float v) {
   else if(mode==2) sampled=vol##N.Sample(sm##N,coord.xyz/coord.w); \
   else { \
    float2 uv=coord.xy/coord.w; \
-   if(mode==15 || mode==16) { \
+   if(mode==6 || mode==15 || mode==16) { \
     uint previous=stages[N].y;enabled=stages[previous].x!=0 && stages[previous].x!=5; \
-    float4 value=source(r,8+previous,0,false);uv=mode==15?value.ar:value.gb; \
+    float4 value=source(r,8+previous,0,false); \
+    if(mode==6) { \
+     float2 bytes=value.bg*255;float2 offset=(bytes-float2(bytes.x>=128?256:0,bytes.y>=128?256:0))/127; \
+     float4 m=bump_matrices[N];uv=coord.xy+float2(dot(m.xz,offset),dot(m.yw,offset)); \
+    } else uv=mode==15?value.ar:value.gb; \
    } \
-   if(enabled) sampled=tx##N.Sample(sm##N,uv); \
+   if(enabled) sampled=sample2d(tx##N,sm##N,uv,gaussian_scale[N]); \
   } \
   r.t##N=sampled;if(enabled && mode!=4 && mode!=5 && stages[N].w && sampled.a==0) discard; \
  } \
@@ -143,7 +160,8 @@ const char* shader_profile(ShaderKind kind) {
     if(kind==ShaderKind::launch) return "cs_5_0";
     if(kind==ShaderKind::clear_pixel || kind==ShaderKind::display_pixel || kind==ShaderKind::gui_pixel ||
        (kind>=ShaderKind::combiner0 && kind<=ShaderKind::combiner8) ||
-       (kind>=ShaderKind::color && kind<=ShaderKind::modulate3d)) return "ps_5_0";
+       (kind>=ShaderKind::color && kind<=ShaderKind::modulate3d) ||
+       (kind>=ShaderKind::fxaa && kind<=ShaderKind::copy_multisample_color)) return "ps_5_0";
     return "vs_5_0";
 }
 std::string shader_source(ShaderKind kind) {
@@ -153,7 +171,7 @@ std::string shader_source(ShaderKind kind) {
         std::string source(combiner_source.substr(0,combiner_source.find("struct R")));
         if(kind==ShaderKind::color)
             return source+"float4 main(P p):SV_Target {return finish((controls.x&255)?saturate(p.c):max(p.c,0));}";
-        const auto sample=kind==ShaderKind::modulate2d?"tx0.Sample(sm0,p.t0.xy/p.t0.w)":
+        const auto sample=kind==ShaderKind::modulate2d?"sample2d(tx0,sm0,p.t0.xy/p.t0.w,gaussian_scale.x)":
             kind==ShaderKind::modulate_cube?"cube0.Sample(sm0,p.t0.xyz)":"vol0.Sample(sm0,p.t0.xyz/p.t0.w)";
         return source+std::format("float4 main(P p):SV_Target {{float4 t={};if(stages[0].w && t.a==0) discard;return finish(saturate(max(p.c,0)*t));}}",sample);
     }
@@ -177,6 +195,71 @@ P main(uint id:SV_VertexID) {P o;o.uv=float2((id<<1)&2,id&2);o.p=float4(o.uv*flo
     case ShaderKind::display_pixel:return R"(
 Texture2D image:register(t0);SamplerState filter:register(s0);
 float4 main(float4 p:SV_Position,float2 uv:TEXCOORD0):SV_Target{return image.Sample(filter,uv);})";
+    case ShaderKind::copy_multisample_color:return R"(
+Texture2DMS<float4> source_colour:register(t0);
+cbuffer C:register(b0){int2 offset;int2 padding;}
+float4 main(float4 position:SV_Position,uint sample:SV_SampleIndex):SV_Target {
+ return source_colour.Load(int2(position.xy)+offset,sample);
+})";
+    case ShaderKind::copy_multisample:return R"(
+Texture2DMS<float4> source_colour:register(t0);Texture2DMS<float> source_depth:register(t1);
+struct Output {float4 colour:SV_Target;float depth:SV_Depth;};
+Output main(float4 position:SV_Position,uint sample:SV_SampleIndex) {
+ Output result;result.colour=source_colour.Load(int2(position.xy),sample);
+ result.depth=source_depth.Load(int2(position.xy),sample);return result;
+})";
+    case ShaderKind::copy_multisample_stencil:return R"(
+Texture2DMS<uint2> source_stencil:register(t2);cbuffer C:register(b0){uint bit_mask;uint3 padding;}
+void main(float4 position:SV_Position,uint sample:SV_SampleIndex) {
+ if((source_stencil.Load(int2(position.xy),sample).y&bit_mask)==0) discard;
+})";
+    case ShaderKind::fxaa:return R"(
+Texture2D image:register(t0);SamplerState filter:register(s0);
+cbuffer C:register(b0){float2 texel;float quality;float spare;}
+float luminance(float2 uv) {return dot(image.SampleLevel(filter,uv,0).rgb,float3(0.299,0.587,0.114));}
+float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
+ float4 centre=image.SampleLevel(filter,uv,0);
+ float m=dot(centre.rgb,float3(0.299,0.587,0.114));
+ float n=luminance(uv-float2(0,texel.y)),s=luminance(uv+float2(0,texel.y));
+ float w=luminance(uv-float2(texel.x,0)),e=luminance(uv+float2(texel.x,0));
+ float low=min(m,min(min(n,s),min(w,e))),high=max(m,max(max(n,s),max(w,e)));
+ float contrast=high-low;
+ float threshold=quality<1.5?0.25:quality<2.5?0.166667:0.125;
+ float minimum=quality<1.5?0.083333:quality<2.5?0.0625:0.03125;
+ if(contrast<max(minimum,high*threshold)) return centre;
+ float nw=luminance(uv-texel),ne=luminance(uv+float2(texel.x,-texel.y));
+ float sw=luminance(uv+float2(-texel.x,texel.y)),se=luminance(uv+texel);
+ float horizontal=abs(nw+sw-2*w)+2*abs(n+s-2*m)+abs(ne+se-2*e);
+ float vertical=abs(nw+ne-2*n)+2*abs(w+e-2*m)+abs(sw+se-2*s);
+ bool along_x=horizontal>=vertical;
+ float side_a=along_x?n:w,side_b=along_x?s:e;
+ float gradient_a=abs(side_a-m),gradient_b=abs(side_b-m);
+ bool first=gradient_a>=gradient_b;
+ float average=0.5*(m+(first?side_a:side_b));
+ float limit=0.25*max(gradient_a,gradient_b);
+ float2 normal=along_x?float2(0,texel.y):float2(texel.x,0);
+ if(first) normal=-normal;
+ float2 tangent=along_x?float2(texel.x,0):float2(0,texel.y);
+ float2 origin=uv+normal*0.5,negative=origin-tangent,positive=origin+tangent;
+ float difference_a=luminance(negative)-average,difference_b=luminance(positive)-average;
+ bool done_a=abs(difference_a)>=limit,done_b=abs(difference_b)>=limit;
+ uint steps=quality<1.5?4:quality<2.5?8:12;
+ [loop] for(uint step=1;step<steps && (!done_a || !done_b);++step) {
+  if(!done_a) {negative-=tangent;difference_a=luminance(negative)-average;done_a=abs(difference_a)>=limit;}
+  if(!done_b) {positive+=tangent;difference_b=luminance(positive)-average;done_b=abs(difference_b)>=limit;}
+ }
+ float distance_a=along_x?uv.x-negative.x:uv.y-negative.y;
+ float distance_b=along_x?positive.x-uv.x:positive.y-uv.y;
+ bool nearer_a=distance_a<distance_b;
+ float edge=0.5-min(distance_a,distance_b)/(distance_a+distance_b);
+ if(((nearer_a?difference_a:difference_b)<0)==(m<average)) edge=0;
+ float local=(2*(n+s+w+e)+nw+ne+sw+se)/12;
+ float subpixel=saturate(abs(local-m)/contrast);
+ subpixel=subpixel*subpixel*(3-2*subpixel);subpixel*=subpixel;
+ subpixel*=quality<1.5?0.25:quality<2.5?0.5:0.75;
+ float2 shifted=uv+normal*max(edge,subpixel);
+ return float4(image.SampleLevel(filter,shifted,0).rgb,centre.a);
+})";
     default:throw std::runtime_error("Shader source requires a vertex program or the pinned GUI backend");
     }
 }

@@ -1,4 +1,5 @@
 #include "render.h"
+#include "antialiasing.h"
 #include "shaders.h"
 #include "performance.h"
 #include <Windows.h>
@@ -69,10 +70,12 @@ void validate_fragment(const RenderState& state) {
     }
     for(unsigned i=0;i<4;++i) {
         const auto mode=state.texture_modes[i];
-        if(mode!=0 && mode!=1 && mode!=2 && mode!=3 && mode!=4 && mode!=5 && mode!=15 && mode!=16)
+        if(mode!=0 && mode!=1 && mode!=2 && mode!=3 && mode!=4 && mode!=5 && mode!=6 && mode!=15 && mode!=16)
             throw std::runtime_error("Texture shader mode is not supported yet: "+hex32(mode));
         if(mode==5 && state.texture_clip[i]&~15U) throw std::runtime_error("Invalid texture clip-plane comparisons");
-        if((mode==15 || mode==16) && state.texture_sources[i]>=i) throw std::runtime_error("Dependent texture must read an earlier stage");
+        if((mode==6 || mode==15 || mode==16) && state.texture_sources[i]>=i) throw std::runtime_error("Dependent texture must read an earlier stage");
+        if((mode==2 || mode==3) && (((state.texture_filter[i]>>16)&63)==7 || ((state.texture_filter[i]>>24)&15)==4))
+            throw std::runtime_error("Convolution texture filtering requires a 2D texture");
     }
 }
 unsigned simple_combiner(const RenderState& s) {
@@ -144,7 +147,7 @@ D3D11_STENCIL_OP stencil_operation(std::uint32_t value) {
     default:throw std::runtime_error("Unsupported stencil operation");
     }
 }
-using PipelineKey = std::array<std::uint32_t, 32>;
+using PipelineKey = std::array<std::uint32_t, 40>;
 PipelineKey pipeline_key(const RenderState& state) {
     PipelineKey key{};
     std::size_t i = 0;
@@ -152,7 +155,7 @@ PipelineKey pipeline_key(const RenderState& state) {
          std::uint32_t(state.cull), std::uint32_t(state.front_ccw),
          state.depth_function, state.blend_source, state.blend_destination, state.blend_equation,
          state.cull_face, state.color_mask}) key[i++] = value;
-    for (unsigned n = 0; n < 4; ++n) for (auto value : {state.texture_address[n], std::uint32_t(state.linear_filter[n])}) key[i++] = value;
+    for (unsigned n = 0; n < 4; ++n) for (auto value : {state.texture_address[n], std::uint32_t(state.linear_filter[n]),state.texture_filter[n],state.texture_control[n]}) key[i++] = value;
     for(auto value : {std::uint32_t(state.stencil_test),state.stencil_function,state.stencil_read_mask,state.stencil_write_mask,
         state.stencil_fail,state.stencil_depth_fail,state.stencil_pass,std::uint32_t(state.polygon_offset),
         std::bit_cast<std::uint32_t>(state.polygon_offset_scale),std::bit_cast<std::uint32_t>(state.polygon_offset_bias),std::uint32_t(state.scissor_test)}) key[i++]=value;
@@ -164,6 +167,8 @@ struct alignas(16) Constants {
     std::array<std::array<std::uint32_t,4>,8> combiners;
     std::array<std::array<std::uint32_t,4>,4> stages;
     std::array<std::uint32_t,4> controls;
+    std::array<Float4,4> bump_matrices;
+    std::array<std::uint32_t,4> gaussian_scale; // Zero disables; otherwise physical texels per guest texel.
 };
 struct alignas(16) ProgramUniforms {
     VertexConstants constants;
@@ -319,14 +324,19 @@ struct Renderer::Impl {
         std::uint32_t width,height;
         SurfaceColor color_format=SurfaceColor::rgba8;
         SurfaceDepth depth_format=SurfaceDepth::z24s8;
-        ComPtr<ID3D11Texture2D> color,depth;
+        ComPtr<ID3D11Texture2D> color,depth,resolved;
         ComPtr<ID3D11RenderTargetView> color_view;
         ComPtr<ID3D11DepthStencilView> depth_view;
-        ComPtr<ID3D11ShaderResourceView> texture_view;
+        ComPtr<ID3D11ShaderResourceView> texture_view,multisample_view,depth_texture,stencil_texture;
+        std::shared_ptr<bool> dirty=std::make_shared<bool>(false);
     };
     std::map<std::uint32_t,FrameTarget> targets;
     std::uint32_t current_target=0;
     std::size_t target_bytes=0;
+    std::size_t target_limit=256*1024*1024;
+    unsigned samples=1,msaa_supported=0,antialiasing_quality=0,anisotropy=0;
+    std::unique_ptr<FrameAntialiasing> antialiasing;
+    std::unique_ptr<MultisampleCopy> multisample_copy;
     HWND window=nullptr;
     ComPtr<IDXGISwapChain2> swapchain;
     ComPtr<ID3D11Texture2D> published;
@@ -388,8 +398,9 @@ struct Renderer::Impl {
     static unsigned depth_size(SurfaceDepth depth) {return depth==SurfaceDepth::z16?2U:4U;}
     std::size_t target_size(unsigned w,unsigned h,SurfaceColor color=SurfaceColor::rgba8,
                             SurfaceDepth depth=SurfaceDepth::z24s8,bool shared=false) const {
-        return std::size_t(w)*h*((shared?0:color_size(color))+depth_size(depth))*resolution_scale*resolution_scale;
+        return std::size_t(w)*h*((shared?0:color_size(color)*(samples+(samples>1?1:0)))+depth_size(depth)*samples)*resolution_scale*resolution_scale;
     }
+    std::size_t presentation_bytes() const {return published_bytes+(antialiasing?antialiasing->bytes():0);}
     RenderStats stats;
     std::size_t texture_bytes = 0;
     bool recording = false, ended = false;
@@ -438,6 +449,19 @@ struct Renderer::Impl {
         DXGI_ADAPTER_DESC description{};
         checked(gpu->GetDesc(&description), "Adapter description");
         adapter = utf8(description.Description);
+        target_limit=std::clamp<std::size_t>(description.DedicatedVideoMemory/4,256ULL*1024*1024,2ULL*1024*1024*1024);
+        for(unsigned count:{2U,4U,8U}) {
+            bool supported=true;
+            for(auto format:{DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_B5G6R5_UNORM,DXGI_FORMAT_D16_UNORM,DXGI_FORMAT_D24_UNORM_S8_UINT}) {
+                UINT levels=0;const auto status=device->CheckMultisampleQualityLevels(format,count,&levels);
+                supported&=SUCCEEDED(status) && levels!=0;
+            }
+            for(auto format:{DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_B5G6R5_UNORM,DXGI_FORMAT_R16_UNORM,DXGI_FORMAT_R24_UNORM_X8_TYPELESS,DXGI_FORMAT_X24_TYPELESS_G8_UINT}) {
+                UINT flags=0;supported&=SUCCEEDED(device->CheckFormatSupport(format,&flags)) && (flags&D3D11_FORMAT_SUPPORT_MULTISAMPLE_LOAD)!=0;
+                if(format==DXGI_FORMAT_R8G8B8A8_UNORM || format==DXGI_FORMAT_B5G6R5_UNORM) supported&=(flags&D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE)!=0;
+            }
+            if(supported) msaa_supported|=count;
+        }
         if (debug) checked(device.As(&info), "D3D11 debug queue");
         resize(w,h);
         const auto code = shader(ShaderKind::passthrough);
@@ -544,28 +568,52 @@ struct Renderer::Impl {
     void draw(const RenderState&, Bytes, std::size_t, std::span<const std::uint32_t>,
               const Program* = nullptr, const ProgramUniforms* = nullptr,const StreamDraw* = nullptr);
     FrameTarget make_target(std::uint32_t w,std::uint32_t h,SurfaceColor color_format=SurfaceColor::rgba8,
-                           SurfaceDepth depth_format=SurfaceDepth::z24s8,const FrameTarget* shared=nullptr) {
+                           SurfaceDepth depth_format=SurfaceDepth::z24s8,const FrameTarget* shared=nullptr,unsigned sample_count=0) {
         extent(w,h);
         FrameTarget output{w,h,color_format,depth_format};
         const auto native_color=color_format==SurfaceColor::rgb565?DXGI_FORMAT_B5G6R5_UNORM:DXGI_FORMAT_R8G8B8A8_UNORM;
         D3D11_TEXTURE2D_DESC texture{};
         texture.Width=w*resolution_scale; texture.Height=h*resolution_scale; texture.MipLevels=texture.ArraySize=1;
         extent(texture.Width,texture.Height);
-        texture.Format=native_color; texture.SampleDesc.Count=1;
+        texture.Format=native_color; texture.SampleDesc.Count=sample_count?sample_count:samples;
         texture.BindFlags=D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         if(shared) {
             if(shared->width!=w || shared->height!=h || shared->color_format!=color_format)
                 throw std::runtime_error("Shared color image dimensions or format differ");
             output.color=shared->color;output.color_view=shared->color_view;output.texture_view=shared->texture_view;
+            output.resolved=shared->resolved;output.multisample_view=shared->multisample_view;output.dirty=shared->dirty;
         } else {
             checked(device->CreateTexture2D(&texture,nullptr,&output.color), "Offscreen target");
             checked(device->CreateRenderTargetView(output.color.Get(),nullptr,&output.color_view), "Offscreen view");
-            checked(device->CreateShaderResourceView(output.color.Get(),nullptr,&output.texture_view),"Target texture view");
+            output.resolved=output.color;
+            if(texture.SampleDesc.Count>1) {
+                checked(device->CreateShaderResourceView(output.color.Get(),nullptr,&output.multisample_view),"Multisample colour view");
+                const auto count=texture.SampleDesc.Count;texture.SampleDesc.Count=1;
+                checked(device->CreateTexture2D(&texture,nullptr,&output.resolved),"Resolved target");texture.SampleDesc.Count=count;
+            }
+            checked(device->CreateShaderResourceView(output.resolved.Get(),nullptr,&output.texture_view),"Target texture view");
         }
-        texture.Format=depth_format==SurfaceDepth::z16?DXGI_FORMAT_D16_UNORM:DXGI_FORMAT_D24_UNORM_S8_UINT; texture.BindFlags=D3D11_BIND_DEPTH_STENCIL;
+        texture.Format=depth_format==SurfaceDepth::z16?DXGI_FORMAT_R16_TYPELESS:DXGI_FORMAT_R24G8_TYPELESS;
+        texture.BindFlags=D3D11_BIND_DEPTH_STENCIL|(texture.SampleDesc.Count>1?D3D11_BIND_SHADER_RESOURCE:0);
         checked(device->CreateTexture2D(&texture,nullptr,&output.depth), "Depth target");
-        checked(device->CreateDepthStencilView(output.depth.Get(),nullptr,&output.depth_view), "Depth view");
+        D3D11_DEPTH_STENCIL_VIEW_DESC depth_view{};depth_view.Format=depth_format==SurfaceDepth::z16?DXGI_FORMAT_D16_UNORM:DXGI_FORMAT_D24_UNORM_S8_UINT;
+        depth_view.ViewDimension=texture.SampleDesc.Count>1?D3D11_DSV_DIMENSION_TEXTURE2DMS:D3D11_DSV_DIMENSION_TEXTURE2D;
+        checked(device->CreateDepthStencilView(output.depth.Get(),&depth_view,&output.depth_view), "Depth view");
+        if(texture.SampleDesc.Count>1) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC view{};view.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2DMS;
+            view.Format=depth_format==SurfaceDepth::z16?DXGI_FORMAT_R16_UNORM:DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+            checked(device->CreateShaderResourceView(output.depth.Get(),&view,&output.depth_texture),"Multisample depth view");
+            if(depth_format!=SurfaceDepth::z16) {view.Format=DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+                checked(device->CreateShaderResourceView(output.depth.Get(),&view,&output.stencil_texture),"Multisample stencil view");}
+        }
         return output;
+    }
+    void resolve(FrameTarget& image) {
+        if(samples==1 || !*image.dirty) return;
+        unbind_textures();context->OMSetRenderTargets(0,nullptr,nullptr);
+        const auto format=image.color_format==SurfaceColor::rgb565?DXGI_FORMAT_B5G6R5_UNORM:DXGI_FORMAT_R8G8B8A8_UNORM;
+        context->ResolveSubresource(image.resolved.Get(),0,image.color.Get(),0,format);*image.dirty=false;++stats.target_copies;
+        auto output=rtv.Get();context->OMSetRenderTargets(1,&output,dsv.Get());
     }
     void unbind_textures() {
         std::array<ID3D11ShaderResourceView*,12> empty{};
@@ -588,18 +636,19 @@ struct Renderer::Impl {
         if (target && width==w && height==h) return;
         const auto required=target_size(w,h);
         const auto prior=target?target_size(width,height):0;
-        if(required>256*1024*1024-(target_bytes-prior)) throw std::runtime_error("Render targets exceed 256 MiB");
+        if(required>target_limit-(target_bytes-prior)) throw std::runtime_error("Render targets exceed the graphics memory budget; reduce resolution or MSAA.");
         auto output=make_target(w,h);
         targets.insert_or_assign(0,std::move(output));target_bytes=target_bytes-prior+required;
         select_target(0);ended=false;
+        if(antialiasing) antialiasing=std::make_unique<FrameAntialiasing>(device.Get(),context.Get(),w*resolution_scale,h*resolution_scale,antialiasing_quality,stats.shader_compilations);
         if(window) prepare_presentation();
     }
     void prepare_presentation() {
         published_view.Reset();published.Reset();published_bytes=0;published_ready=false;
-        D3D11_TEXTURE2D_DESC description{};targets.at(0).color->GetDesc(&description);
+        D3D11_TEXTURE2D_DESC description{};targets.at(0).resolved->GetDesc(&description);
         description.BindFlags=D3D11_BIND_SHADER_RESOURCE;
         const auto bytes=std::size_t(description.Width)*description.Height*4;
-        if(bytes>256*1024*1024-target_bytes) throw std::runtime_error("Presentation image exceeds the render-target budget");
+        if(bytes+(antialiasing?antialiasing->bytes():0)>target_limit-target_bytes) throw std::runtime_error("Presentation image exceeds the graphics memory budget");
         checked(device->CreateTexture2D(&description,nullptr,&published),"Completed presentation image");
         checked(device->CreateShaderResourceView(published.Get(),nullptr,&published_view),"Completed presentation view");
         published_bytes=bytes;
@@ -615,6 +664,32 @@ void Renderer::aspect_ratio(float aspect) {
     if(!std::isfinite(aspect) || aspect<1 || aspect>4) throw std::runtime_error("Invalid display aspect ratio");
     impl_->display_aspect=aspect;
 }
+bool Renderer::supports_msaa(unsigned samples) const {return samples>=2 && samples<=8 && std::has_single_bit(samples) && (impl_->msaa_supported&samples)!=0;}
+void Renderer::enhancements(unsigned quality,unsigned anisotropy) {
+    auto& r=*impl_;
+    if(r.recording || r.targets.size()!=1 || r.texture_bytes || quality>6 || anisotropy>16 || (anisotropy && !std::has_single_bit(anisotropy)))
+        throw std::runtime_error("Change image quality before starting the game.");
+    const unsigned samples=quality>=4?1U<<(quality-3):1U;
+    if(samples>1 && !supports_msaa(samples)) throw std::runtime_error("This MSAA level is unavailable on your graphics device.");
+    std::unique_ptr<FrameAntialiasing> aa;
+    std::unique_ptr<MultisampleCopy> copy;
+    const auto& main=r.targets.at(0);
+    if(quality && quality<=3) aa=std::make_unique<FrameAntialiasing>(r.device.Get(),r.context.Get(),main.width*r.resolution_scale,main.height*r.resolution_scale,quality,r.stats.shader_compilations);
+    if(samples>1) copy=std::make_unique<MultisampleCopy>(r.device.Get(),r.context.Get(),r.stats.shader_compilations);
+    if(samples!=r.samples) {
+        const auto previous=r.samples;r.samples=samples;
+        try {
+            const auto bytes=r.target_size(main.width,main.height);
+            if(bytes+r.published_bytes>r.target_limit) throw std::runtime_error("Reduce internal resolution or MSAA to fit the graphics memory budget.");
+            auto output=r.make_target(main.width,main.height);
+            r.unbind_textures();r.context->OMSetRenderTargets(0,nullptr,nullptr);
+            r.targets.at(0)=std::move(output);r.target_bytes=bytes;r.select_target(0);r.ended=false;
+        } catch(...) {r.samples=previous;throw;}
+    }
+    r.antialiasing=std::move(aa);r.multisample_copy=std::move(copy);r.antialiasing_quality=quality;r.anisotropy=anisotropy;
+    r.pipelines.clear();
+    if(r.window) r.prepare_presentation();
+}
 std::uint32_t Renderer::create_target(std::uint32_t width,std::uint32_t height,SurfaceColor color,SurfaceDepth depth,std::uint32_t shared_color,bool reuse_slot) {
     auto& r=*impl_;extent(width,height);
     if(r.recording) throw std::runtime_error("Create render targets before frame submission");
@@ -622,7 +697,7 @@ std::uint32_t Renderer::create_target(std::uint32_t width,std::uint32_t height,S
     if(shared_color!=UINT32_MAX && (!shared_color || shared==r.targets.end()))
         throw std::runtime_error("Share the color image of an existing auxiliary target");
     const auto required=r.target_size(width,height,color,depth,shared!=r.targets.end());
-    if(required>256*1024*1024-r.target_bytes-r.published_bytes)
+    if(required>r.target_limit-r.target_bytes-r.presentation_bytes())
         throw std::runtime_error("Render target resource limit reached");
     auto output=r.make_target(width,height,color,depth,shared==r.targets.end()?nullptr:&shared->second);
     ++r.stats.target_creations;
@@ -659,11 +734,11 @@ void Renderer::grow_target(std::uint32_t target,std::uint32_t width,std::uint32_
     if(width==original.width && height==original.height) return;
     std::vector<std::uint32_t> aliases{target};
     for(const auto& [id,image]:r.targets) if(id!=target && image.color==original.color) aliases.push_back(id);
-    unsigned channels=r.color_size(original.color_format);
-    for(const auto id:aliases) channels+=r.depth_size(r.targets.at(id).depth_format);
+    unsigned channels=r.color_size(original.color_format)*(r.samples+(r.samples>1?1:0));
+    for(const auto id:aliases) channels+=r.depth_size(r.targets.at(id).depth_format)*r.samples;
     const auto previous=std::size_t(original.width)*original.height*channels*r.resolution_scale*r.resolution_scale;
     const auto required=std::size_t(width)*height*channels*r.resolution_scale*r.resolution_scale;
-    if(required>256*1024*1024-(r.target_bytes-previous)-r.published_bytes) throw std::runtime_error("Render targets exceed 256 MiB");
+    if(required>r.target_limit-(r.target_bytes-previous)-r.presentation_bytes()) throw std::runtime_error("Render targets exceed the graphics memory budget; reduce resolution or MSAA.");
     r.unbind_textures();r.context->OMSetRenderTargets(0,nullptr,nullptr);
     for(const auto identifier:aliases) {
     const auto prior=r.targets.at(identifier);
@@ -672,9 +747,14 @@ void Renderer::grow_target(std::uint32_t target,std::uint32_t width,std::uint32_
     constexpr float black[4]{};
     if(identifier==target) {
         r.context->ClearRenderTargetView(output.color_view.Get(),black);
-        r.context->CopySubresourceRegion(output.color.Get(),0,0,0,0,prior.color.Get(),0,nullptr);
+        if(r.samples==1) r.context->CopySubresourceRegion(output.color.Get(),0,0,0,0,prior.color.Get(),0,nullptr);
     }
     r.context->ClearDepthStencilView(output.depth_view.Get(),D3D11_CLEAR_DEPTH|(prior.depth_format==SurfaceDepth::z16?0:D3D11_CLEAR_STENCIL),1,0);
+    if(r.samples>1) {
+        r.multisample_copy->grow(prior.multisample_view.Get(),prior.depth_texture.Get(),prior.stencil_texture.Get(),
+            output.color_view.Get(),output.depth_view.Get(),prior.width*r.resolution_scale,prior.height*r.resolution_scale);
+        *output.dirty=true;
+    } else {
     // Depth/stencil resources require whole copies with matching dimensions.
     // Migrate their packed bits through ordinary typeless textures, then copy
     // the complete enlarged image back into its depth/stencil resource.
@@ -688,6 +768,7 @@ void Renderer::grow_target(std::uint32_t target,std::uint32_t width,std::uint32_
     r.context->CopyResource(grown_depth.Get(),output.depth.Get());
     r.context->CopySubresourceRegion(grown_depth.Get(),0,0,0,0,previous_depth.Get(),0,nullptr);
     r.context->CopyResource(output.depth.Get(),grown_depth.Get());
+    }
     r.targets.at(identifier)=std::move(output);r.textures[identifier]=r.targets.at(identifier).texture_view;
     }
     r.target_bytes=r.target_bytes-previous+required;r.select_target(r.current_target);
@@ -700,6 +781,7 @@ void Renderer::copy_target(std::uint32_t destination) {
         throw std::runtime_error("Target copy requires a distinct target with matching dimensions");
     r.unbind_textures();r.context->OMSetRenderTargets(0,nullptr,nullptr);
     r.context->CopyResource(found->second.color.Get(),r.target.Get());
+    *found->second.dirty=true;
     auto view=r.rtv.Get();r.context->OMSetRenderTargets(1,&view,r.dsv.Get());
 }
 void Renderer::copy_region(std::uint32_t destination,std::uint32_t source,
@@ -719,6 +801,18 @@ void Renderer::copy_region(std::uint32_t destination,std::uint32_t source,
     width*=r.resolution_scale;height*=r.resolution_scale;++r.stats.target_copies;
     r.unbind_textures();r.context->OMSetRenderTargets(0,nullptr,nullptr);
     const D3D11_BOX region{sx,sy,0,sx+width,sy+height,1};
+    if(r.samples>1) {
+        auto view=input.multisample_view;
+        ComPtr<ID3D11Texture2D> snapshot;
+        if(input.color==output.color) {
+            D3D11_TEXTURE2D_DESC description{};input.color->GetDesc(&description);description.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+            checked(r.device->CreateTexture2D(&description,nullptr,&snapshot),"Overlapping multisample image copy");
+            r.context->CopyResource(snapshot.Get(),input.color.Get());view.Reset();
+            checked(r.device->CreateShaderResourceView(snapshot.Get(),nullptr,&view),"Multisample copy source");
+        }
+        r.multisample_copy->color(view.Get(),output.color_view.Get(),sx,sy,dx,dy,width,height);*output.dirty=true;
+        auto target=r.rtv.Get();r.context->OMSetRenderTargets(1,&target,r.dsv.Get());return;
+    }
     if(input.color==output.color) {
         D3D11_TEXTURE2D_DESC description{};input.color->GetDesc(&description);
         description.Width=width;description.Height=height;description.BindFlags=0;
@@ -749,6 +843,7 @@ void Renderer::copy_to_main() {
     }
     r.unbind_textures();r.context->OMSetRenderTargets(0,nullptr,nullptr);
     r.context->CopyResource(r.target.Get(),source.Get());
+    *r.targets.at(0).dirty=true;
     r.ended=true;
 }
 ID3D11Device* Renderer::native_device() const {return impl_->device.Get();}
@@ -782,7 +877,7 @@ void Renderer::performance_resources() {
         valid=SUCCEEDED(adapter3->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&local)) &&
             SUCCEEDED(adapter3->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,&shared));
     const auto live=std::ranges::count_if(r.textures,[](const auto& view){return bool(view);});
-    r.profile->resources(local.CurrentUsage,local.Budget,shared.CurrentUsage,valid,live,r.targets.size(),r.texture_bytes,r.target_bytes+r.published_bytes);
+    r.profile->resources(local.CurrentUsage,local.Budget,shared.CurrentUsage,valid,live,r.targets.size(),r.texture_bytes,r.target_bytes+r.presentation_bytes());
 }
 void Renderer::attach_window(void* native_window) {
     auto& r=*impl_;
@@ -827,7 +922,10 @@ void Renderer::publish_frame() {
     auto& r=*impl_;
     if(!r.window || !r.ended || r.recording || r.current_target) throw std::runtime_error("Publish a completed main image on an attached window");
     r.unbind_textures();r.context->OMSetRenderTargets(0,nullptr,nullptr);
-    r.context->CopyResource(r.published.Get(),r.targets.at(0).color.Get());
+    auto& main=r.targets.at(0);r.resolve(main);
+    auto* source=main.resolved.Get();
+    if(r.antialiasing) {r.antialiasing->publish(main.texture_view.Get());source=r.antialiasing->image();}
+    r.context->CopyResource(r.published.Get(),source);
     r.published_ready=true;r.select_target(r.current_target);
 }
 bool Renderer::display(bool published,bool wait) {
@@ -835,6 +933,10 @@ bool Renderer::display(bool published,bool wait) {
     if(published && (!r.published_ready || r.recording)) return false;
     if(!r.window || r.recording || (!published && (!r.ended || r.current_target)))
         throw std::runtime_error("Display a completed image on its attached window");
+    if(!published) {
+        auto& main=r.targets.at(0);r.resolve(main);
+        if(r.antialiasing) {r.unbind_textures();r.antialiasing->publish(main.texture_view.Get());}
+    }
     RECT rectangle{};if(!GetClientRect(r.window,&rectangle)) throw std::runtime_error("Cannot read window dimensions");
     const auto width=static_cast<std::uint32_t>(rectangle.right),height=static_cast<std::uint32_t>(rectangle.bottom);
     if(!width || !height) return false;
@@ -855,7 +957,7 @@ bool Renderer::display(bool published,bool wait) {
     r.context->OMSetBlendState(nullptr,nullptr,UINT_MAX);
     r.context->IASetInputLayout(nullptr);r.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     r.context->VSSetShader(r.display_vs.Get(),nullptr,0);r.context->PSSetShader(r.display_ps.Get(),nullptr,0);
-    auto texture=published?r.published_view.Get():r.targets.at(0).texture_view.Get();auto sampler=r.display_sampler.Get();
+    auto texture=published?r.published_view.Get():(r.antialiasing?r.antialiasing->view():r.targets.at(0).texture_view.Get());auto sampler=r.display_sampler.Get();
     r.context->PSSetShaderResources(0,1,&texture);r.context->PSSetSamplers(0,1,&sampler);r.context->Draw(3,0);
     r.unbind_textures();r.displaying=true;return true;
 }
@@ -1006,6 +1108,7 @@ void Renderer::prepare(const RenderState& state) {
     checked(r.device->CreateDepthStencilState(&depth, &pipeline.depth), "Depth state");
     D3D11_RASTERIZER_DESC raster{};
     raster.FillMode = D3D11_FILL_SOLID; raster.DepthClipEnable = TRUE;
+    raster.MultisampleEnable=r.samples>1;
     raster.CullMode = D3D11_CULL_NONE;
     if (state.cull) {
         if (state.cull_face == 0x404) raster.CullMode = D3D11_CULL_FRONT;
@@ -1022,12 +1125,27 @@ void Renderer::prepare(const RenderState& state) {
     checked(r.device->CreateRasterizerState(&raster, &pipeline.raster), "Rasterizer state");
     for (unsigned i = 0; i < 4; ++i) {
         D3D11_SAMPLER_DESC sampler{};
-        sampler.Filter = state.linear_filter[i] ? D3D11_FILTER_MIN_MAG_MIP_LINEAR : D3D11_FILTER_MIN_MAG_MIP_POINT;
+        const auto filter=state.texture_filter[i]?state.texture_filter[i]:(state.linear_filter[i]?0x02060000U:0x01030000U);
+        const auto min=(filter>>16)&63,mag=(filter>>24)&15,control=state.texture_control[i];
+        const bool gaussian=min==7 && mag==4 && ((filter>>13)&7)==2;
+        if(!gaussian && (min<1 || min>6 || mag<1 || mag>2))
+            throw std::runtime_error(std::format("Unsupported texture filter at stage {}: {} (min {}, mag {}, shader {})",
+                i,hex32(filter),min,mag,state.texture_modes[i]));
+        const bool mip=min>=3 && min<=6,min_linear=(min&1)==0;
+        auto strength=r.anisotropy?r.anisotropy:1U<<((control>>4)&3);
+        // The shader applies the Gaussian kernel at LOD zero. Its individual
+        // taps interpolate linearly and must not acquire anisotropic filtering.
+        sampler.Filter=gaussian?D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT:
+            static_cast<D3D11_FILTER>((min_linear?0x10:0)|(mag==2?4:0)|(min>=5?1:0));
+        if(!gaussian && strength>1 && min_linear && mag==2) sampler.Filter=D3D11_FILTER_ANISOTROPIC;
+        else strength=1;
         sampler.AddressU = address_mode(state.texture_address[i] & 15);
         sampler.AddressV = address_mode((state.texture_address[i] >> 8) & 15);
         sampler.AddressW = address_mode((state.texture_address[i] >> 16) & 15);
-        sampler.MaxAnisotropy = 1; sampler.ComparisonFunc = D3D11_COMPARISON_NEVER;
-        sampler.MaxLOD = D3D11_FLOAT32_MAX;
+        sampler.MaxAnisotropy=strength;sampler.ComparisonFunc=D3D11_COMPARISON_NEVER;
+        int bias=filter&0x1FFF;if(bias&0x1000) bias-=0x2000;
+        sampler.MipLODBias=mip?std::clamp(bias/256.0f,D3D11_MIP_LOD_BIAS_MIN,D3D11_MIP_LOD_BIAS_MAX):0;
+        sampler.MinLOD=mip?float((control>>18)&0xFFF)/256:0;sampler.MaxLOD=mip?float((control>>6)&0xFFF)/256:0;
         checked(r.device->CreateSamplerState(&sampler, &pipeline.samplers[i]), "Sampler state");
         ++r.stats.sampler_misses;
     }
@@ -1152,6 +1270,7 @@ void Renderer::clear(std::uint32_t argb, float depth) {
     auto& r = *impl_;
     if (!std::isfinite(depth) || depth < 0 || depth > 1) throw std::runtime_error("Invalid clear depth");
     const auto rgba = color(argb);
+    *r.targets.at(r.current_target).dirty=true;
     r.context->ClearRenderTargetView(r.rtv.Get(), rgba.data());
     r.context->ClearDepthStencilView(r.dsv.Get(),D3D11_CLEAR_DEPTH|
         (r.targets.at(r.current_target).depth_format==SurfaceDepth::z16?0:D3D11_CLEAR_STENCIL),depth,0);
@@ -1161,6 +1280,7 @@ void Renderer::clear_buffers(std::uint32_t flags,std::uint32_t argb,float depth,
                              std::span<const std::int32_t> rectangle) {
     auto& r=*impl_;
     if(flags&~0xF3U) throw std::runtime_error("Invalid clear channel flags");
+    if(flags&0xF0U) *r.targets.at(r.current_target).dirty=true;
     if(r.targets.at(r.current_target).depth_format==SurfaceDepth::z16) flags&=~2U;
     if(!std::isfinite(depth) || depth<0 || depth>1) throw std::runtime_error("Invalid clear depth");
     if(!rectangle.empty() && rectangle.size()!=4) throw std::runtime_error("A clear rectangle requires four coordinates");
@@ -1258,6 +1378,7 @@ void Renderer::draw_streams(const RenderState& state,std::uint32_t layout,const 
 void Renderer::Impl::draw(const RenderState& state,Bytes vertex_bytes,std::size_t vertex_count,
                           std::span<const std::uint32_t> input_indices,const Program* program,const ProgramUniforms* uniforms,const StreamDraw* streams) {
     auto& r = *this;
+    if(state.color_mask) *r.targets.at(r.current_target).dirty=true;
     if (!r.recording) throw std::runtime_error("Begin a frame before drawing");
     if (!vertex_count || vertex_count > Impl::max_vertices || input_indices.size() > Impl::max_vertices)
         throw std::runtime_error("Draw exceeds bounded vertex/index buffers");
@@ -1330,8 +1451,14 @@ void Renderer::Impl::draw(const RenderState& state,Bytes vertex_bytes,std::size_
             throw std::runtime_error("Copy the active render target before sampling its contents");
         if(sampled && r.texture_dimensions[state.textures[i]]!=(mode==3?3U:mode==2?2U:1U))
             throw std::runtime_error("Texture resource dimension does not match its shader mode");
-        if(sampled) views[i+(mode==3?4:mode==2?8:0)] = r.textures[state.textures[i]].Get();
+        if(sampled) {
+            if(auto image=r.targets.find(state.textures[i]);image!=r.targets.end()) r.resolve(image->second);
+            views[i+(mode==3?4:mode==2?8:0)] = r.textures[state.textures[i]].Get();
+        }
         constants.stages[i]={mode,state.texture_sources[i],state.texture_clip[i],std::uint32_t(state.alpha_kill[i])};
+        constants.bump_matrices[i]=state.bump_matrices[i];
+        if(((state.texture_filter[i]>>16)&63)==7)
+            constants.gaussian_scale[i]=r.targets.contains(state.textures[i])?r.resolution_scale:1;
         samplers[i] = pipeline.samplers[i].Get();
     }
     std::array<UINT,17> stream_offsets{},stream_strides{};
@@ -1449,15 +1576,20 @@ void Renderer::end() {
 Image Renderer::readback() {
     auto& r = *impl_;
     if (!r.ended || r.recording) throw std::runtime_error("End a frame before reading back");
+    auto& surface=r.targets.at(r.current_target);r.resolve(surface);
+    if(!r.current_target && r.antialiasing) {
+        r.unbind_textures();r.antialiasing->publish(surface.texture_view.Get());
+        auto image=r.antialiasing->readback();r.select_target(0);return image;
+    }
     Image image{r.width*r.resolution_scale,r.height*r.resolution_scale,
         std::vector<std::byte>(std::size_t(r.width)*r.height*r.resolution_scale*r.resolution_scale*4)};
     // CPU-readable storage belongs to explicit diagnostics, not every live
     // game surface. Shared color images are counted once in the resident pool.
-    D3D11_TEXTURE2D_DESC description{};r.target->GetDesc(&description);
+    D3D11_TEXTURE2D_DESC description{};surface.resolved->GetDesc(&description);
     description.Usage=D3D11_USAGE_STAGING;description.BindFlags=0;description.MiscFlags=0;description.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
     ComPtr<ID3D11Texture2D> staging;
     checked(r.device->CreateTexture2D(&description,nullptr,&staging),"Diagnostic readback target");
-    r.context->CopyResource(staging.Get(), r.target.Get());
+    r.context->CopyResource(staging.Get(),surface.resolved.Get());
     D3D11_MAPPED_SUBRESOURCE mapped{};
     checked(r.context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped), "Frame readback");
     const bool rgb565=r.targets.at(r.current_target).color_format==SurfaceColor::rgb565;
@@ -1488,14 +1620,23 @@ std::vector<std::byte> Renderer::read_depth(std::uint32_t target) {
     auto& r=*impl_;
     if(r.recording) throw std::runtime_error("End submission before capturing depth");
     const auto& surface=r.targets.at(target);
-    D3D11_TEXTURE2D_DESC description{};surface.depth->GetDesc(&description);
+    auto depth=surface.depth;
+    if(r.samples>1) {
+        auto single=r.make_target(surface.width,surface.height,surface.color_format,surface.depth_format,nullptr,1);
+        r.unbind_textures();r.context->OMSetRenderTargets(0,nullptr,nullptr);
+        r.context->ClearDepthStencilView(single.depth_view.Get(),D3D11_CLEAR_DEPTH|(surface.depth_format==SurfaceDepth::z16?0:D3D11_CLEAR_STENCIL),1,0);
+        r.multisample_copy->grow(surface.multisample_view.Get(),surface.depth_texture.Get(),surface.stencil_texture.Get(),single.color_view.Get(),single.depth_view.Get(),
+            surface.width*r.resolution_scale,surface.height*r.resolution_scale);
+        depth=single.depth;r.select_target(r.current_target);
+    }
+    D3D11_TEXTURE2D_DESC description{};depth->GetDesc(&description);
     description.Usage=D3D11_USAGE_STAGING;description.BindFlags=0;description.MiscFlags=0;
     description.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
     ComPtr<ID3D11Texture2D> staging;
     checked(r.device->CreateTexture2D(&description,nullptr,&staging),"Depth capture storage");
     const auto pitch=std::size_t(surface.width)*r.resolution_scale*(surface.depth_format==SurfaceDepth::z16?2:4);
     std::vector<std::byte> bytes(pitch*surface.height*r.resolution_scale);
-    r.context->CopyResource(staging.Get(),surface.depth.Get());
+    r.context->CopyResource(staging.Get(),depth.Get());
     D3D11_MAPPED_SUBRESOURCE mapped{};
     checked(r.context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped),"Depth capture");
     for(unsigned y=0;y<surface.height*r.resolution_scale;++y) std::memcpy(bytes.data()+y*pitch,
@@ -1518,7 +1659,8 @@ Image Renderer::read_display() {
     r.context->Unmap(staging.Get(),0);return image;
 }
 RenderStats Renderer::stats() const {
-    auto result=impl_->stats;result.texture_bytes=impl_->texture_bytes;result.target_bytes=impl_->target_bytes+impl_->published_bytes;
+    auto result=impl_->stats;result.texture_bytes=impl_->texture_bytes;result.target_bytes=impl_->target_bytes+impl_->presentation_bytes();
+    result.antialiasing=impl_->antialiasing_quality;result.anisotropy=impl_->anisotropy;
     result.texture_slots=static_cast<std::uint32_t>(impl_->textures.size()-1);result.resolution_scale=impl_->resolution_scale;return result;
 }
 std::string Renderer::adapter() const { return impl_->adapter; }
@@ -1537,8 +1679,9 @@ std::vector<std::string> Renderer::errors() const {
     }
     return messages;
 }
-std::string check_image_copy(bool warp,bool debug) {
+std::string check_image_copy(bool warp,bool debug,unsigned antialiasing) {
     Renderer renderer(8,8,warp,debug);
+    renderer.enhancements(antialiasing,16);
     std::vector<std::pair<std::string,bool>> cases;
     const auto copy=[](Image& destination,const Image& source,unsigned sx,unsigned sy,unsigned dx,unsigned dy,unsigned w,unsigned h) {
         for(unsigned y=0;y<h;++y) std::memcpy(destination.rgba.data()+(std::size_t(dy+y)*destination.width+dx)*4,
@@ -1558,12 +1701,20 @@ std::string check_image_copy(bool warp,bool debug) {
     compare("overlapping copy retains source pixels",expected);
     renderer.copy_region(destination,source,0,0,0,0,8,8);compare("whole image copy",original);
     const auto alias=renderer.create_target(8,8,SurfaceColor::rgba8,SurfaceDepth::z16,destination);
-    renderer.set_target(alias);renderer.clear(0xFF5A3C78);const auto shared=renderer.readback();
+    renderer.set_target(destination);renderer.clear_buffers(3,0,0.625f,0xA5);const auto original_depth=renderer.read_depth(destination);
+    renderer.set_target(alias);renderer.clear(0xFF5A3C78,0.375f);const auto shared=renderer.readback();const auto alias_depth=renderer.read_depth(alias);
     renderer.set_target(destination);compare("color image shared across depth views",shared);
     renderer.grow_target(destination,10,9);
     Image grown{10,9,std::vector<std::byte>(10*9*4)};copy(grown,shared,0,0,0,0,8,8);
     compare("shared image growth preserves pixels",grown);
     renderer.set_target(alias);compare("alias follows image growth",grown);
+    const auto preserved=[&](std::uint32_t target,const std::vector<std::byte>& expected,unsigned bytes) {
+        const auto actual=renderer.read_depth(target);
+        for(unsigned y=0;y<8;++y) if(std::memcmp(actual.data()+y*10*bytes,expected.data()+y*8*bytes,8*bytes)) return false;
+        return true;
+    };
+    cases.emplace_back("D24 depth and stencil survive growth",preserved(destination,original_depth,4));
+    cases.emplace_back("D16 alias depth survives growth",preserved(alias,alias_depth,2));
     const auto rgb_source=renderer.create_target(3,3,SurfaceColor::rgb565,SurfaceDepth::z16);
     const auto rgb_destination=renderer.create_target(3,3,SurfaceColor::rgb565,SurfaceDepth::z16);
     renderer.set_target(rgb_source);renderer.clear(0xFF00FF00);const auto green=renderer.readback();
@@ -1577,7 +1728,9 @@ std::string check_image_copy(bool warp,bool debug) {
     cases.emplace_back("D3D11 validation clean",errors.empty());
     const auto passed=std::ranges::all_of(cases,[](const auto& test){return test.second;});
     std::string report="{\"format\":\"smbd-image-copy-v1\",\"adapter\":"+json(renderer.adapter())+
-        ",\"passed\":"+(passed?"true":"false")+",\"cases\":[";
+        ",\"antialiasing\":"+std::to_string(antialiasing)+",\"msaa_supported\":[";
+    bool first=true;for(unsigned samples:{2U,4U,8U}) if(renderer.supports_msaa(samples)) {if(!first) report+=',';report+=std::to_string(samples);first=false;}
+    report+="],\"passed\":"+std::string(passed?"true":"false")+",\"cases\":[";
     for(std::size_t i=0;i<cases.size();++i) {
         if(i) report+=',';
         report+="{\"name\":"+json(cases[i].first)+",\"passed\":"+(cases[i].second?"true":"false")+'}';

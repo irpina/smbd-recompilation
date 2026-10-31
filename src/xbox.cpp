@@ -39,9 +39,10 @@ std::uint32_t align_up(std::uint32_t value,std::uint32_t alignment) {
     return (value+alignment-1)&~(alignment-1);
 }
 struct ThreadExit { std::uint32_t status; };
+char path_character(char ch) {return ch=='/'?'\\':ch>='a' && ch<='z'?char(ch-'a'+'A'):ch;}
 std::string folded(std::string_view text) {
     std::string result(text);
-    for(auto& ch:result) {if(ch=='/') ch='\\';else if(ch>='a' && ch<='z') ch-=32;}
+    for(auto& ch:result) ch=path_character(ch);
     return result;
 }
 bool wildcard(std::string_view pattern,std::string_view name) {
@@ -112,7 +113,7 @@ struct Xbox::State {
     };
     struct OpenFile {
         DiscEntry entry{};
-        std::string path,link,pattern;
+        std::string path,share_path,link,pattern;
         std::uint64_t position=0;
         std::uint32_t access=0,share=0,options=0;
         bool device=false,listing_loaded=false;
@@ -209,7 +210,11 @@ struct Xbox::State {
     FrameClock::Time frame_started{};
     double frame_debt=0,logic_fraction=0,stage_time=0;
     std::uint32_t stage_expected=UINT32_MAX;
+    std::uint32_t stage_groups=0;
+    std::vector<FrameCounter> stage_group_clocks;
     bool in_frame_loop=false;
+    bool menu_layout_active=false;
+    std::array<std::uint32_t,5> menu_layout_inputs{};
     struct GoalCrossing { bool pending=false;std::uint32_t goal=0,group=0;std::uint8_t type=0; };
     std::array<std::array<GoalCrossing,2>,8> goal_crossings{};
     bool sampling_goals=false;
@@ -238,6 +243,21 @@ struct Xbox::State {
         memory.map(kernel_base,kernel_image);
         memory.map(0x80000000U+heap_begin,ram.subspan(heap_begin));
         memory.map(0xF0000000U+heap_begin,ram.subspan(heap_begin));
+        {
+            // The storage/dialog backdrop at 0x482FB8 is an 8x8 solid sprite
+            // centred on (320,240). Its fixed 80x60 scale covers only 4:3;
+            // Align the D3D8 pixel origin and round the full-screen bounds
+            // outward on the NV2A 1/16-pixel grid. Its 1/32 raster bias must
+            // not leave edge samples uncovered with high-resolution MSAA.
+            constexpr std::array<std::uint32_t,6> backdrop{0x60,0x43A00000,0x43700000,0x3F800000,0x42A00000,0x42700000};
+            for(unsigned i=0;i<backdrop.size();++i) if(memory.load<std::uint32_t>(0x482FB8+i*4)!=backdrop[i])
+                throw std::runtime_error("Original dialog backdrop does not match the supported game");
+            const float width=this->host.ultrawide?480.0f*21/9:this->host.widescreen?480.0f*16/9:640.0f;
+            memory.store<std::uint32_t>(0x482FBC,std::bit_cast<std::uint32_t>(319.5f));
+            memory.store<std::uint32_t>(0x482FC0,std::bit_cast<std::uint32_t>(239.5f));
+            memory.store<std::uint32_t>(0x482FC8,std::bit_cast<std::uint32_t>((width+1.0f/16)/8));
+            memory.store<std::uint32_t>(0x482FCC,std::bit_cast<std::uint32_t>((480.0f+1.0f/16)/8));
+        }
         if(this->host.ultrawide) {
             // Shared original camera aspect and horizontal canvas width. Their
             // only indexed readers configure cameras/culling and the UI canvas.
@@ -744,7 +764,7 @@ struct Xbox::State {
         const auto scene=memory.load<std::uint16_t>(0x6C9288);
         const bool reset=!in_frame_loop || mode!=timing_mode || scene!=timing_scene;
         in_frame_loop=true;frame_thread=current;
-        if(reset) {frame_debt=logic_fraction=0;source_clock={};++timing_epochs;stage_expected=UINT32_MAX;goal_crossings={};}
+        if(reset) {frame_debt=logic_fraction=0;source_clock={};++timing_epochs;stage_expected=UINT32_MAX;stage_groups=0;goal_crossings={};}
         const auto rate=render_rate();
         double delta=1;
         if(!reset && rate!=60) {
@@ -755,7 +775,32 @@ struct Xbox::State {
         logic_fraction+=delta;
         const bool tick=logic_fraction>=1-1e-9;
         if(tick) logic_fraction=std::max(0.0,logic_fraction-1);
+        if(tick) menu_layout_active=false;
         frame_step={static_cast<float>(delta),static_cast<float>(logic_fraction),tick};
+    }
+    void draw_menu_layout(Cpu& cpu,bool record) {
+        // These five controller results are live at the presentation boundary;
+        // the remaining locals and all vertices are rebuilt by the game.
+        constexpr std::array offsets{0x18U,0x24U,0x2CU,0x34U,0x4CU};
+        if(record) {
+            for(unsigned i=0;i<offsets.size();++i) menu_layout_inputs[i]=memory.load<std::uint32_t>(cpu.registers[esp]+offsets[i]);
+            menu_layout_active=true;return;
+        }
+        if(!menu_layout_active) return;
+        // 2A13B0 combines menu input with the marker drawing at 2A22D2.
+        // Intermediate calls enter its verified presentation section directly.
+        const auto saved=cpu.registers;const auto flags=cpu.flags,pc=cpu.eip;
+        if(saved[esp]<current->stack+0x4B4) throw NativeBoundary(0x2A13B0,"menu drawing exhausted its guest stack");
+        const auto stack=saved[esp]-0x400;
+        memory.store<std::uint32_t>(stack,return_sentinel);
+        // Original 2A13B7 reserves A4 bytes and saves four registers.
+        for(unsigned i=0;i<offsets.size();++i) memory.store<std::uint32_t>(stack-0xB4+offsets[i],menu_layout_inputs[i]);
+        cpu.registers[esp]=stack;
+        cpu.eip=0; // Native entry, not an observed original indirect call site.
+        invoke_native(cpu,memory,native_menu_helpers[0]);
+        if(cpu.eip!=return_sentinel || cpu.registers[esp]!=stack+4)
+            throw NativeBoundary(0x2A13B0,"original menu layout has an unexpected ABI");
+        cpu.registers=saved;cpu.flags=flags;cpu.eip=pc;
     }
     bool take_goal(Cpu& cpu,std::uint32_t query) {
         if(sampling_goals) return false;
@@ -765,7 +810,7 @@ struct Xbox::State {
         auto& crossing=goal_crossings[(ball-0x738DF0)/0x1B0][primary?0:1];
         if(!crossing.pending) return false;
         const auto state=memory.load<std::uint8_t>(ball+3);
-        if(state!=4 && state!=32) {crossing={};return false;}
+        if(state!=4 && state!=8 && state!=10 && state!=32) {crossing={};return false;}
         memory.store<std::uint32_t>(memory.load<std::uint32_t>(cpu.registers[esp]+4),crossing.goal);
         if(primary) {
             memory.store<std::uint32_t>(memory.load<std::uint32_t>(cpu.registers[esp]+8),crossing.group);
@@ -783,12 +828,16 @@ struct Xbox::State {
         for(unsigned i=0;i<goal_crossings.size();++i) {
             const auto ball=0x738DF0+i*0x1B0;
             const auto state=memory.load<std::uint8_t>(ball+3);
+            const bool replay=state==8 || state==10;
             auto& crossings=goal_crossings[i];
             const auto active=memory.load<std::uint8_t>(ball);
-            if(!active || active==4 || (state!=4 && state!=32)) {crossings={};continue;}
+            if(!active || active==4 || (state!=4 && state!=32 && !replay)) {crossings={};continue;}
             for(unsigned kind=0;kind<2;++kind) {
                 auto& crossing=crossings[kind];
-                if(crossing.pending || (!kind && (memory.load<std::uint32_t>(ball+0x98)&0x100))) continue;
+                // Replay metadata can already carry the goal flag before its
+                // interpolated position crosses the plane. INFO still needs
+                // that geometric crossing to start the replay celebration.
+                if(crossing.pending || (!replay && !kind && (memory.load<std::uint32_t>(ball+0x98)&0x100))) continue;
                 // 13D66..13D82: ECX=ball, three caller-cleaned output pointers
                 // for goal ID, animation group and one-byte goal type. The
                 // separate 13CEB query uses ECX and only the goal-ID pointer.
@@ -813,6 +862,22 @@ struct Xbox::State {
         else if(advance) stage_time+=frame_step.delta;
         stage_expected=count+(advance && frame_step.logic?1U:0U);
         cpu.floating.xmm[0][0]=std::bit_cast<std::uint32_t>(static_cast<float>(stage_time));
+    }
+    void sample_stage_group_time(Cpu& cpu) {
+        const auto groups=memory.load<std::uint32_t>(0x72FF78);
+        const auto count_groups=memory.load<std::uint32_t>(memory.load<std::uint32_t>(0x730130)+8);
+        if(groups!=stage_groups || count_groups!=stage_group_clocks.size()) {
+            if(count_groups>4096) throw NativeBoundary(0x7F5E2,"stage animation group count exceeds its bound");
+            stage_group_clocks.assign(count_groups,{});stage_groups=groups;
+        }
+        const auto group=cpu.registers[esi];
+        if(group<stage_groups || (group-stage_groups)%0xA4 || (group-stage_groups)/0xA4>=stage_group_clocks.size())
+            throw NativeBoundary(0x7F5E2,"stage animation clock is outside its group array");
+        constexpr int speeds[]={1,0,-1,2,-2,0,0,0};
+        const auto speed=memory.load<std::uint8_t>(0x72FF9C)&5?0:speeds[memory.load<std::uint32_t>(group)&7];
+        const auto time=stage_group_clocks[(group-stage_groups)/0xA4].sample(memory.load<std::uint32_t>(group+4),speed);
+        const auto hz=std::bit_cast<float>(memory.load<std::uint32_t>(0x6C7F48));
+        cpu.floating.xmm[2][0]=std::bit_cast<std::uint32_t>(static_cast<float>(time/hz));
     }
     void wait_frame(Cpu& cpu) {
         // The original common frame wrapper serves gameplay, movies, menus,
@@ -1561,7 +1626,8 @@ struct Xbox::State {
         if((options&1) && !entry->directory()) return 0xC0000103;
         if((options&0x40) && entry->directory()) return 0xC00000BA;
         if(options&0x1000) return write_protected; // Delete on close.
-        for(const auto& [handle,existing]:handles) if(existing.kind==Object::Kind::file && folded(existing.file->path)==folded(*name)) {
+        auto share_path=folded(*name);
+        for(const auto& [handle,existing]:handles) if(existing.kind==Object::Kind::file && existing.file->share_path==share_path) {
             if((access&(0x80000000U|1U)) && !(existing.file->share&1)) return 0xC0000043;
             if((existing.file->access&(0x80000000U|1U)) && !(share&1)) return 0xC0000043;
         }
@@ -1569,6 +1635,7 @@ struct Xbox::State {
         if(!base) return no_memory;
         const auto address=base|0x80000000U,handle=next_handle; next_handle+=4;
         auto file=std::make_shared<OpenFile>();file->entry=*entry;file->path=*name;
+        file->share_path=std::move(share_path);
         file->access=access;file->share=share;file->options=options;file->device=relative->empty();
         memory.store<std::uint16_t>(address,5);
         memory.store<std::uint8_t>(address+2,static_cast<std::uint8_t>(((access&(0x80000000U|1U))?2:0)|((share&7)<<4)));
@@ -2601,6 +2668,20 @@ void native_stage_time(Cpu& cpu,Memory& memory) {
     auto& host=*static_cast<Xbox::State*>(cpu.kernel->context);
     if(&host.memory!=&memory) throw NativeBoundary(cpu.eip,"stage clock received another guest memory");
     HostFloatingScope floating(cpu.floating);host.sample_stage_time(cpu);
+}
+void native_stage_group_time(Cpu& cpu,Memory& memory) {
+    if(!cpu.kernel || !cpu.kernel->context || cpu.kernel->entries[255]!=Xbox::State::dispatch_kernel<255>)
+        throw NativeBoundary(cpu.eip,"stage group clock requires the Xbox host provider");
+    auto& host=*static_cast<Xbox::State*>(cpu.kernel->context);
+    if(&host.memory!=&memory) throw NativeBoundary(cpu.eip,"stage group clock received another guest memory");
+    HostFloatingScope floating(cpu.floating);host.sample_stage_group_time(cpu);
+}
+void native_menu_layout(Cpu& cpu,Memory& memory,bool record) {
+    if(!cpu.kernel || !cpu.kernel->context || cpu.kernel->entries[255]!=Xbox::State::dispatch_kernel<255>)
+        throw NativeBoundary(cpu.eip,"menu drawing requires the Xbox host provider");
+    auto& host=*static_cast<Xbox::State*>(cpu.kernel->context);
+    if(&host.memory!=&memory) throw NativeBoundary(cpu.eip,"menu drawing received another guest memory");
+    host.draw_menu_layout(cpu,record);
 }
 void native_sample_goals(Cpu& cpu,Memory& memory) {
     if(!cpu.kernel || !cpu.kernel->context || cpu.kernel->entries[255]!=Xbox::State::dispatch_kernel<255>)

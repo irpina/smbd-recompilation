@@ -53,10 +53,22 @@ RenderState gpu_render_state(std::span<const std::uint32_t,2048> registers,std::
     for(unsigned i=0;i<4;++i) {
         const auto method=0x1B00+i*0x40;
         s.texture_modes[i]=(reg(0x1E70)>>(i*5))&31;
+        if(s.texture_modes[i]==6) {
+            auto& matrix=s.bump_matrices[i];
+            for(unsigned n=0;n<4;++n) matrix[n]=real(reg(method+0x28+n*4));
+            const auto format=(reg(method+4)>>8)&255;
+            if(format==0x12 || format==0x1E) {
+                const auto image=reg(method+0x1C),width=image>>16,height=image&65535;
+                if(!width || !height) throw std::runtime_error("Invalid linear bump texture dimensions");
+                matrix[0]/=width;matrix[2]/=width;matrix[1]/=height;matrix[3]/=height;
+            }
+        }
         s.texture_sources[i]=i<2?0:(reg(0x1E78)>>(8+i*4))&15;
         s.texture_clip[i]=(reg(0x17F8)>>(i*4))&15;s.texture_address[i]=reg(method+8);
         const auto filter=reg(method+0x14);
-        s.linear_filter[i]=((filter>>24)&15)==2;s.alpha_kill[i]=(reg(method+12)&4)!=0;
+        const bool sampled=s.texture_modes[i] && s.texture_modes[i]!=4 && s.texture_modes[i]!=5;
+        s.texture_filter[i]=sampled?filter:0;s.texture_control[i]=sampled?reg(method+12):0x0003FFC0;
+        s.linear_filter[i]=sampled && ((filter>>24)&15)==2;s.alpha_kill[i]=(reg(method+12)&4)!=0;
     }
     return s;
 }
@@ -207,8 +219,8 @@ struct Gpu::Impl {
                 capture_first_frame=statistics.flips+1;capture_active=true;
                 capture_trace.clear();capture_trace.open(capture.directory/"draws.jsonl",std::ios::binary|std::ios::trunc);
                 capture_trace.exceptions(std::ios::failbit|std::ios::badbit);
-                capture_record(std::format("{{\"type\":\"header\",\"format\":\"smbd-gpu-frame-v1\",\"source_sha256\":{},\"adapter\":{},\"frame\":{},\"resolution_scale\":{},\"byte_order\":\"little\",\"draw_limit\":2048,\"binary_limit\":{},\"trace_limit\":{},\"image_rgba_limit\":{}}}",
-                    json(capture_source),json(renderer.adapter()),capture_first_frame,renderer.stats().resolution_scale,binary_limit,text_limit,image_limit));
+                capture_record(std::format("{{\"type\":\"header\",\"format\":\"smbd-gpu-frame-v1\",\"source_sha256\":{},\"adapter\":{},\"frame\":{},\"resolution_scale\":{},\"antialiasing\":{},\"anisotropy\":{},\"byte_order\":\"little\",\"draw_limit\":2048,\"binary_limit\":{},\"trace_limit\":{},\"image_rgba_limit\":{}}}",
+                    json(capture_source),json(renderer.adapter()),capture_first_frame,renderer.stats().resolution_scale,renderer.stats().antialiasing,renderer.stats().anisotropy,binary_limit,text_limit,image_limit));
                 capture_record("{\"type\":\"initial_registers\",\"data\":"+json(hex_bytes(std::as_bytes(std::span(registers))))+'}');
                 for(unsigned i=0;i<unsigned(ShaderKind::count);++i) {
                     const auto kind=ShaderKind(i);
@@ -722,6 +734,79 @@ void Gpu::snapshot() {
     g.target=0;
 }
 GpuStats Gpu::stats() const {return impl_->statistics;}
+std::string Gpu::check_bump_mapping() {
+    Renderer renderer(8,8,false,true);
+    renderer.enhancements(0,16);
+    const std::array<std::uint32_t,1> bump{0xFF20C040U}; // Signed offsets: blue +64, green -64.
+    std::array<std::uint32_t,64> grid{};
+    for(unsigned y=0;y<8;++y) for(unsigned x=0;x<8;++x) grid[y*8+x]=0xFF000025U|((x*32+16)<<16)|((y*32+16)<<8);
+    const auto input=renderer.upload({1,1,TextureFormat::argb8_linear,std::as_bytes(std::span(bump)),1,4});
+    const auto texture=renderer.upload({8,8,TextureFormat::argb8_linear,std::as_bytes(std::span(grid)),1,32});
+    std::array<std::uint32_t,2048> registers{};
+    const auto reg=[&](unsigned method)->std::uint32_t& {return registers[method/4];};
+    reg(0x200)=reg(0x204)=8U<<16;reg(0x350)=0x8006;reg(0x354)=0x201;reg(0x358)=0x01010101;
+    reg(0x364)=0x207;reg(0x370)=reg(0x374)=reg(0x378)=0x1E00;
+    for(unsigned i=0;i<4;++i) {reg(0x1B08+i*0x40)=0x030303;reg(0x1B14+i*0x40)=0x01010000;}
+    std::array<Vertex,4> vertices{};
+    constexpr std::array<Float4,4> positions{{{-1,1,0,1},{1,1,0,1},{1,-1,0,1},{-1,-1,0,1}}};
+    for(unsigned i=0;i<4;++i) {vertices[i].position=positions[i];vertices[i].uv.fill({0.5f,0.5f,0,2});}
+    bool passed=true;unsigned cases=0;std::ostringstream output;
+    const auto sample=[&](std::string_view name,const RenderState& state,std::uint32_t expected) {
+        renderer.prepare(state);renderer.begin();renderer.draw(state,vertices);renderer.end();
+        const auto image=renderer.readback();constexpr auto pixel=(4*8+4)*4;
+        const auto actual=(std::uint32_t(image.rgba[pixel])<<16)|(std::uint32_t(image.rgba[pixel+1])<<8)|std::uint32_t(image.rgba[pixel+2]);
+        const bool matches=actual==expected;passed&=matches;
+        if(cases++) output<<',';
+        output<<std::format("{{\"name\":{},\"passed\":{},\"expected\":{},\"actual\":{}}}",json(name),matches,json(hex32(expected)),json(hex32(actual)));
+    };
+    const auto check=[&](std::string_view name,unsigned stage,unsigned previous,Float4 matrix,unsigned x,unsigned y,bool linear=false,bool enabled=true) {
+        reg(0x1E70)=(enabled?1U<<(previous*5):0)|(6U<<(stage*5));
+        reg(0x1E78)=previous<<(8+stage*4);
+        reg(0x288)=8+stage;reg(0x28C)=(24+stage)<<8;
+        const auto method=0x1B00+stage*0x40;
+        reg(method+4)=(linear?0x12U:6U)<<8;reg(method+0x1C)=(8U<<16)|8U;
+        for(unsigned n=0;n<4;++n) reg(method+0x28+n*4)=std::bit_cast<std::uint32_t>(matrix[n]*(linear?8:1));
+        auto state=gpu_render_state(registers,8);state.textures[previous]=input;state.textures[stage]=texture;
+        sample(name,state,enabled?grid[y*8+x]&0xFFFFFFU:0);
+    };
+    check("zero matrix keeps unprojected coordinates",1,0,{},4,4);
+    check("blue and green signed offsets",1,0,{0.25f,0,0,0.25f},5,2);
+    check("negative matrix",1,0,{-0.25f,0,0,-0.25f},2,5);
+    check("off-diagonal matrix order",1,0,{0,0.25f,0.5f,0},1,5);
+    check("linear texture offset units",1,0,{0,0.25f,0.5f,0},1,5,true);
+    check("stage two reads stage one",2,1,{0.25f,0,0,0.25f},5,2);
+    check("stage three reads stage one",3,1,{0.25f,0,0,0.25f},5,2);
+    check("disabled source suppresses dependent sample",1,0,{},0,0,false,false);
+    // Reproduce World 4's actual filter word from game-stopped-1793466043888.json.
+    // A single white texel distinguishes the Gaussian kernel from linear filtering.
+    grid.fill(0xFF000000);grid[4*8+4]=0xFFFFFFFF;
+    const auto impulse=renderer.upload({8,8,TextureFormat::argb8_linear,std::as_bytes(std::span(grid)),1,32});
+    reg(0x1E70)=1|(6<<5);reg(0x1B54)=0x04074000;
+    auto state=gpu_render_state(registers,8);state.textures[0]=input;state.textures[1]=impulse;
+    const auto gaussian=[&](std::string_view name,float x,float y,std::uint32_t expected) {
+        for(auto& v:vertices) v.uv.fill({x/8,y/8,0,2});
+        sample(name,state,expected);
+    };
+    gaussian("World 4 Gaussian center weight with anisotropy 16",4.5f,4.5f,0x404040);
+    gaussian("Gaussian edge weight",3.5f,4.5f,0x202020);
+    gaussian("Gaussian corner weight",3.5f,3.5f,0x101010);
+    gaussian("Gaussian support ends outside the kernel",2.5f,4.5f,0);
+    gaussian("Gaussian between texels",4,4.5f,0x303030);
+    state.bump_matrices[1][0]=127.0f/512;
+    gaussian("Gaussian follows the bump coordinate offset",3.5f,4.5f,0x404040);
+    state.bump_matrices[1]={};state.texture_filter[1]=0x02020000;
+    gaussian("ordinary linear filtering retains its sharp center",4.5f,4.5f,0xFFFFFF);
+    state={};state.primitive=8;state.texture_modes[0]=1;state.textures[0]=impulse;
+    state.texture_filter[0]=0x04074000;state.combiner_control=1;state.final_inputs={12,0x1C00};
+    state.color_inputs[0]=0x04080000;state.alpha_inputs[0]=0x14180000;
+    state.color_outputs[0]=state.alpha_outputs[0]=0xC0;
+    for(auto& v:vertices) v.uv[0]={4.5f/8,4.5f/8,0,1};
+    sample("Gaussian also applies to the simple combiner",state,0x404040);
+    const auto errors=renderer.errors();passed&=errors.empty();
+    std::string messages;for(const auto& error:errors) {if(!messages.empty()) messages+=',';messages+=json(error);}
+    return std::format("{{\"format\":\"smbd-bump-mapping-v1\",\"adapter\":{},\"passed\":{},\"cases\":[{}],\"errors\":[{}]}}",
+        json(renderer.adapter()),passed,output.str(),messages);
+}
 std::string Gpu::check_texture_cache() {
     Renderer renderer(8,8,false,true);
     std::vector<std::byte> ram(64*1024);Memory memory(0,ram);

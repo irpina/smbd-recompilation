@@ -44,10 +44,11 @@ std::string window_diagnostic(SDL_Window* window,const smbd::Renderer& renderer,
     if(!SDL_GetWindowSize(window,&width,&height) || !SDL_GetWindowSizeInPixels(window,&pixel_width,&pixel_height))
         throw std::runtime_error(SDL_GetError());
     const auto utc=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-    return std::format("{{\"format\":\"smbd-window-state-v1\",\"phase\":\"capture_request\",\"utc_ms\":{},\"source_sha256\":{},\"build\":{},\"platform\":{},\"sdl_version\":{},\"video_driver\":{},\"adapter\":{},\"logical_size\":[{},{}],\"pixel_size\":[{},{}],\"pixel_density\":{},\"display_scale\":{},\"fullscreen\":{},\"vsync\":{},\"resolution_scale\":{},\"widescreen\":{},\"aspect_mode\":{},\"requested_aspect_mode\":{},\"audio_muted\":{},\"inputs_automated\":{},\"playing\":{},\"frame\":{},\"session_log\":{},\"refresh_rate\":{},\"logic_hz\":60,\"native_scene_steps\":true,\"interpolation\":false}}\n",
+    return std::format("{{\"format\":\"smbd-window-state-v1\",\"phase\":\"capture_request\",\"utc_ms\":{},\"source_sha256\":{},\"build\":{},\"platform\":{},\"sdl_version\":{},\"video_driver\":{},\"adapter\":{},\"logical_size\":[{},{}],\"pixel_size\":[{},{}],\"pixel_density\":{},\"display_scale\":{},\"fullscreen\":{},\"vsync\":{},\"resolution_scale\":{},\"widescreen\":{},\"aspect_mode\":{},\"requested_aspect_mode\":{},\"audio_muted\":{},\"inputs_automated\":{},\"playing\":{},\"frame\":{},\"session_log\":{},\"refresh_rate\":{},\"logic_hz\":60,\"native_scene_steps\":true,\"interpolation\":false,\"antialiasing\":{},\"anisotropy\":{},\"window_title\":{}}}\n",
         utc,smbd::json(sha),smbd::json(__DATE__ " " __TIME__),smbd::json(SDL_GetPlatform()),SDL_GetVersion(),smbd::json(SDL_GetCurrentVideoDriver()),smbd::json(renderer.adapter()),
         width,height,pixel_width,pixel_height,SDL_GetWindowPixelDensity(window),SDL_GetWindowDisplayScale(window),
-        (SDL_GetWindowFlags(window)&SDL_WINDOW_FULLSCREEN)!=0,settings.vsync,renderer.stats().resolution_scale,aspect!=0,aspect,settings.aspect,muted,automated,playing,frames,smbd::json(smbd::path_text(smbd::diagnostic_log())),settings.refresh_rate);
+        (SDL_GetWindowFlags(window)&SDL_WINDOW_FULLSCREEN)!=0,settings.vsync,renderer.stats().resolution_scale,aspect!=0,aspect,settings.aspect,muted,automated,playing,frames,smbd::json(smbd::path_text(smbd::diagnostic_log())),settings.refresh_rate,
+        renderer.stats().antialiasing,renderer.stats().anisotropy,smbd::json(SDL_GetWindowTitle(window)));
 }
 struct WriteWatches {
     unsigned count=0;
@@ -59,7 +60,8 @@ struct WriteWatches {
     }
 };
 int run(int argc,wchar_t** argv,bool restarting=false) {
-    std::uint64_t frame_limit=0,seconds=0,capture_at=1,performance_at=1,performance_frames=3600,motion_at=2600,motion_frames=120,benchmark_ticks=0;
+    const auto startup_started=std::chrono::steady_clock::now();
+    std::uint64_t frame_limit=0,seconds=0,capture_at=1,performance_at=1,performance_frames=3600,motion_at=2600,motion_frames=120,benchmark_ticks=0,restart_at=0;
     std::filesystem::path capture,timeline,report,call_trace,frame_capture,storage,performance_output,motion_report;
     const auto root=application_root();
     std::filesystem::path settings_path=root/"data/local/settings.cfg",settings_capture,executable_override,disc_override;
@@ -92,15 +94,15 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
                 throw std::runtime_error("Write watches require an address and at most four slots");
             watches.push_back(address);
         }
-        else if((option=="--frames" || option=="--seconds" || option=="--capture-at" || option=="--performance-at" || option=="--performance-frames" || option=="--motion-at" || option=="--motion-frames" || option=="--benchmark-ticks") && i+1<argc) {
+        else if((option=="--frames" || option=="--seconds" || option=="--capture-at" || option=="--performance-at" || option=="--performance-frames" || option=="--motion-at" || option=="--motion-frames" || option=="--benchmark-ticks" || option=="--restart-at") && i+1<argc) {
             const auto value=smbd::utf8(argv[++i]);
-            auto& limit=option=="--benchmark-ticks"?benchmark_ticks:option=="--frames"?frame_limit:option=="--seconds"?seconds:option=="--performance-at"?performance_at:option=="--performance-frames"?performance_frames:option=="--motion-at"?motion_at:option=="--motion-frames"?motion_frames:capture_at;
+            auto& limit=option=="--restart-at"?restart_at:option=="--benchmark-ticks"?benchmark_ticks:option=="--frames"?frame_limit:option=="--seconds"?seconds:option=="--performance-at"?performance_at:option=="--performance-frames"?performance_frames:option=="--motion-at"?motion_at:option=="--motion-frames"?motion_frames:capture_at;
             if(option=="--capture-at") capture_at_set=true;
             if(option=="--performance-at" || option=="--performance-frames") performance_limits_set=true;
             const auto parsed=std::from_chars(value.data(),value.data()+value.size(),limit);
-            if(parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size() || !limit || (option=="--seconds" && limit>3600))
-                throw std::runtime_error("Limits must be positive; seconds must not exceed 3600");
-        } else throw std::runtime_error("Usage: smbd [--hidden] [--mute] [--frames COUNT] [--seconds COUNT] [--input TIMELINE.txt] [--stop-after-input] [--capture FRAME.png] [--capture-frame NEW_DIRECTORY] [--capture-at TICK] [--report OUTPUT.json] [--trace-calls OUTPUT.json] [--performance NEW_DIRECTORY] [--performance-at TICK] [--performance-frames COUNT] [--benchmark-ticks COUNT] [--motion-report NEW.json] [--motion-at TICK] [--motion-frames COUNT] [--settings PATH] [--settings-capture NEW_DIRECTORY] [--storage DIRECTORY] [--xbe FILE] [--disc ISO] [--watch-write ADDRESS (up to 4)]");
+            if(parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size() || (!limit && option!="--performance-at") || (option=="--seconds" && limit>3600))
+                throw std::runtime_error("Limits must be positive (performance-at may be zero); seconds must not exceed 3600");
+        } else throw std::runtime_error("Usage: smbd [--hidden] [--mute] [--frames COUNT] [--seconds COUNT] [--input TIMELINE.txt] [--stop-after-input] [--capture FRAME.png] [--capture-frame NEW_DIRECTORY] [--capture-at TICK] [--report OUTPUT.json] [--restart-at FRAME] [--trace-calls OUTPUT.json] [--performance NEW_DIRECTORY] [--performance-at TICK] [--performance-frames COUNT] [--benchmark-ticks COUNT] [--motion-report NEW.json] [--motion-at TICK] [--motion-frames COUNT] [--settings PATH] [--settings-capture NEW_DIRECTORY] [--storage DIRECTORY] [--xbe FILE] [--disc ISO] [--watch-write ADDRESS (up to 4)]");
     }
     if(motion_frames>4096) throw std::runtime_error("Motion reports are limited to 4096 scene frames");
     if(!motion_report.empty() && std::filesystem::exists(motion_report)) throw std::runtime_error("Motion reports require a new file");
@@ -111,6 +113,13 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
     if(performance_limits_set && performance_output.empty()) throw std::runtime_error("Performance limits require --performance DIRECTORY");
     if(!performance_output.empty() && std::filesystem::exists(performance_output)) throw std::runtime_error("Use a fresh performance capture directory");
     muted=muted || hidden || !timeline.empty();
+    const auto startup_phase=[&](std::string_view phase) {
+        if(!report.empty()) {
+            const auto now=std::chrono::steady_clock::now();
+            smbd::diagnostic_record(std::format("{{\"type\":\"startup_phase\",\"phase\":{},\"elapsed_ms\":{},\"clock_ms\":{},\"restart\":{}}}",
+                smbd::json(phase),std::chrono::duration<double,std::milli>(now-startup_started).count(),std::chrono::duration<double,std::milli>(now.time_since_epoch()).count(),restarting));
+        }
+    };
     smbd::Settings settings(root);std::string settings_error;
     try {settings.load(settings_path);} catch(const std::exception& error) {settings_error=error.what();}
     if(!executable_override.empty()) smbd::copy_text(settings.executable.data(),settings.executable.size(),smbd::path_text(std::filesystem::absolute(executable_override)));
@@ -118,26 +127,35 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
     if(!timeline.empty() && !SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1",SDL_HINT_OVERRIDE))
         throw std::runtime_error("Cannot enable background controller input for automation");
     Sdl sdl;
+    startup_phase("SDL ready");
     const auto flags=SDL_WINDOW_RESIZABLE|(hidden?SDL_WINDOW_HIDDEN:0);
     std::unique_ptr<SDL_Window,decltype(&SDL_DestroyWindow)> window(
-        SDL_CreateWindow("Super Monkey Ball Deluxe | F1: settings | F8: frame | F9: performance",static_cast<int>(720*settings.display_aspect()),720,flags),SDL_DestroyWindow);
+        SDL_CreateWindow("Super Monkey Ball Deluxe",static_cast<int>(720*settings.display_aspect()),720,flags),SDL_DestroyWindow);
     if(!window) throw std::runtime_error(SDL_GetError());
     SDL_SetWindowMinimumSize(window.get(),760,520);
     if(settings.fullscreen && !hidden && !SDL_SetWindowFullscreen(window.get(),true)) throw std::runtime_error(SDL_GetError());
     smbd::Renderer renderer(640,480,false,false,static_cast<unsigned>(settings.resolution));
+    startup_phase("renderer ready");
+    try {renderer.enhancements(settings.antialiasing,settings.anisotropy);}
+    catch(const std::exception& error) {
+        settings.antialiasing=0;renderer.enhancements(0,settings.anisotropy);
+        settings_error=std::string(error.what())+" Antialiasing has been set to Off.";
+        try {settings.save(settings_path);} catch(const std::exception& save_error) {settings_error+=' ';settings_error+=save_error.what();}
+    }
     renderer.aspect_ratio(settings.display_aspect());
     renderer.attach_window(SDL_GetPointerProperty(SDL_GetWindowProperties(window.get()),SDL_PROP_WINDOW_WIN32_HWND_POINTER,nullptr));
     smbd::SettingsUi ui(window.get(),renderer,settings,settings_path);
     if(!settings_error.empty()) ui.message(settings_error);
     // Prepare the UI shaders/font atlas before gameplay or performance recording.
-    renderer.clear(0xFF07130C);renderer.display();ui.draw(false,false,0,[]{},[]{});renderer.present(false);
+    renderer.clear(0xFF100C06);renderer.display();ui.draw(false,false,0,[]{},[]{});renderer.present(false);
+    startup_phase("settings ready");
     smbd::FrameClock launcher_clock;
     const auto pace_launcher=[&] {
         const auto now=smbd::FrameClock::Clock::now();launcher_clock.due(presentation_rate(settings,ui),now);
         if(now<launcher_clock.next()) SDL_DelayPrecise(static_cast<Uint64>(std::chrono::duration_cast<std::chrono::nanoseconds>(launcher_clock.next()-now).count()));
         const auto finished=smbd::FrameClock::Clock::now();launcher_clock.advance(finished);launcher_clock.skip_missed(finished);
     };
-    const bool automated=hidden || frame_limit || seconds || !timeline.empty() || !frame_capture.empty() || !performance_output.empty();
+    const bool automated=hidden || frame_limit || seconds || restart_at || !timeline.empty() || !frame_capture.empty() || !performance_output.empty();
     std::filesystem::path launcher_capture;
     const auto capture_launcher=[&] {
         const auto utc=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
@@ -147,24 +165,35 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
     if(!settings_capture.empty()) {
         if(std::filesystem::exists(settings_capture)) throw std::runtime_error("Use a fresh settings capture directory");
         std::filesystem::create_directories(settings_capture);
-        for(int page=0;page<5;++page) {
+        for(int page=0;page<7;++page) {
             ui.category=page;
-            for(unsigned frame=0;frame<3;++frame) {
+            unsigned frame=0;
+            do {
                 SDL_Event event;while(SDL_PollEvent(&event)) ui.event(event);
-                renderer.clear(0xFF07130C);renderer.display();ui.draw(false,false,0,[]{},[]{});
-                if(frame==2) smbd::save_png(renderer.read_display(),settings_capture/std::format("settings-{}.png",page));
-                renderer.present(false);
-            }
+                renderer.clear(0xFF100C06);renderer.display();ui.draw(false,false,0,[]{},[]{});
+                if(frame>=2 && !ui.animating()) smbd::save_png(renderer.read_display(),settings_capture/std::format("settings-{}.png",page));
+                renderer.present(false);++frame;SDL_Delay(1);
+            } while(frame<3 || ui.animating());
         }
-        smbd::write_text(settings_capture/"report.json","{\"format\":\"smbd-settings-capture-v1\",\"pages\":5,\"passed\":true}\n",false);
+        const auto animation_frame=[&](const char* name) {
+            SDL_Delay(35);renderer.clear(0xFF100C06);renderer.display();ui.draw(true,false,0,[]{},[]{});
+            smbd::save_png(renderer.read_display(),settings_capture/name);renderer.present(false);
+        };
+        ui.hide();ui.visible=true;animation_frame("opening.png");
+        while(ui.animating()) {renderer.clear(0xFF100C06);renderer.display();ui.draw(true,false,0,[]{},[]{});renderer.present(false);SDL_Delay(1);}
+        ui.visible=false;animation_frame("closing.png");
+        while(ui.active()) {renderer.clear(0xFF100C06);renderer.display();ui.draw(true,false,0,[]{},[]{});renderer.present(false);SDL_Delay(1);}
+        animation_frame("closed.png");
+        smbd::write_text(settings_capture/"report.json",std::format("{{\"format\":\"smbd-settings-capture-v1\",\"pages\":7,\"passed\":true,\"window_title\":{},\"antialiasing\":{},\"anisotropy\":{}}}\n",
+            smbd::json(SDL_GetWindowTitle(window.get())),renderer.stats().antialiasing,renderer.stats().anisotropy),false);
         return 0;
     }
     if(!automated && !restarting) while(!ui.quit) {
         SDL_Event event;while(SDL_PollEvent(&event)) {
-            ui.event(event);
-            if(event.type==SDL_EVENT_KEY_DOWN && !event.key.repeat && event.key.scancode==SDL_SCANCODE_F8) capture_launcher();
+            const auto handled=ui.event(event);
+            if(!handled && event.type==SDL_EVENT_KEY_DOWN && !event.key.repeat && event.key.scancode==SDL_SCANCODE_F8) capture_launcher();
         }
-        renderer.clear(0xFF07130C);if(!renderer.display()) {SDL_Delay(10);continue;}
+        renderer.clear(0xFF100C06);if(!renderer.display()) {SDL_Delay(10);continue;}
         ui.draw(false,false,0,capture_launcher,[]{});
         if(!launcher_capture.empty()) {
             smbd::save_png(renderer.read_display(),launcher_capture/"window.png");settings.save(launcher_capture/"settings.cfg");
@@ -174,16 +203,20 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
         pace_launcher();renderer.present(settings.vsync);
         if(ui.launch) {
             ui.launch=false;
-            try {settings.validate();break;} catch(const std::exception& error) {ui.message(error.what());ui.category=0;}
+            try {settings.validate();break;} catch(const std::exception& error) {ui.file_message(error.what());}
         }
     }
     if(ui.quit) return 0;
-    if(static_cast<unsigned>(settings.resolution)!=renderer.stats().resolution_scale) return 4;
+    if(static_cast<unsigned>(settings.resolution)!=renderer.stats().resolution_scale ||
+        static_cast<unsigned>(settings.antialiasing)!=renderer.stats().antialiasing ||
+        static_cast<unsigned>(settings.anisotropy)!=renderer.stats().anisotropy) return 4;
     renderer.aspect_ratio(settings.display_aspect());
-    ui.visible=false;
+    ui.hide();
+    startup_phase("game requested");
     smbd::Xbe image(settings.executable_path());
     std::vector<std::byte> ram(64*1024*1024);
     image.load(std::span(ram).subspan(image.base,image.image_size));
+    startup_phase("executable loaded");
     smbd::Memory memory(0,ram);
     WriteWatches active_watches;
     for(unsigned slot=0;slot<watches.size();++slot) {
@@ -242,11 +275,9 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
                     benchmark_complete,benchmark_ticks,benchmark_first_tick,logic_ticks,performance_first+1,frames,benchmark_mode_changes,benchmark_ball_changes,benchmark_start,benchmark_state()),false);
             smbd::write_text(directory/"window.json",window_diagnostic(window.get(),renderer,settings,muted,bool(automation),frames,image.sha256,true,active_aspect),false);
             ui.message("Performance saved: "+smbd::path_text(directory));
-            SDL_SetWindowTitle(window.get(),("Super Monkey Ball Deluxe | Performance saved: "+smbd::path_text(directory)).c_str());
             smbd::diagnostic_record("{\"type\":\"performance_saved\",\"directory\":"+smbd::json(smbd::path_text(directory))+'}');
         } catch(const std::exception& error) {
             performance.stop();performance_error=error.what();
-            SDL_SetWindowTitle(window.get(),("Super Monkey Ball Deluxe | Performance: "+performance_error).c_str());
             ui.message(performance_error);
         }
         renderer.performance(nullptr,frames+1);
@@ -261,8 +292,7 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
         }
         running->performance_recording(true);
         renderer.performance_resources();
-        SDL_SetWindowTitle(window.get(),"Super Monkey Ball Deluxe | Recording performance - F9 saves (60 second limit)");
-        ui.message("Recording performance. F9 saves; recording stops after 60 seconds.");
+        ui.message("Recording performance. Recording stops after 60 seconds.");
     };
     const auto request_capture=[&](const std::filesystem::path& directory) {
         if(!running || running->capture_status().pending) return;
@@ -273,14 +303,12 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
             settings.save(directory/"settings.cfg");
             pending_window_capture=running->capture_status().directory/"window.png";window_capture_error.clear();
             smbd::write_text(directory/"window.json",window_diagnostic(window.get(),renderer,settings,muted,bool(automation),frames,image.sha256,true,active_aspect),false);
-            SDL_SetWindowTitle(window.get(),"Super Monkey Ball Deluxe | Capturing next complete frame...");
             smbd::diagnostic_record("{\"type\":\"frame_capture_requested\",\"directory\":"+smbd::json(smbd::path_text(running->capture_status().directory))+'}');
             ui.message("Capturing frame: "+smbd::path_text(directory));
         } catch(const std::exception& error) {
             running->cancel_capture(error.what());pending_window_capture.clear();
             window_capture_error=error.what();
             ui.message(window_capture_error);
-            SDL_SetWindowTitle(window.get(),("Super Monkey Ball Deluxe | Capture failed: "+window_capture_error).c_str());
             smbd::diagnostic_record("{\"type\":\"frame_capture_request_error\",\"message\":"+smbd::json(error.what())+'}');
         }
     };
@@ -299,10 +327,10 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
                 if(!displayed) throw std::runtime_error("The game window has no drawable area");
                 smbd::save_png(renderer.read_display(),pending_window_capture);
                 const auto& status=running->capture_status();
-                SDL_SetWindowTitle(window.get(),("Super Monkey Ball Deluxe | Capture saved"+std::string(status.truncated?" (size limit reached): ":": ")+smbd::path_text(status.directory)).c_str());
+                ui.message("Capture saved"+std::string(status.truncated?" (size limit reached): ":": ")+smbd::path_text(status.directory));
             } catch(const std::exception& error) {
                 window_capture_error=error.what();
-                SDL_SetWindowTitle(window.get(),("Super Monkey Ball Deluxe | Window capture failed: "+window_capture_error).c_str());
+                ui.message("Window capture failed: "+window_capture_error);
                 smbd::diagnostic_record("{\"type\":\"window_capture_error\",\"message\":"+smbd::json(error.what())+'}');
                 try {smbd::write_text(pending_window_capture.parent_path()/"window-error.json","{\"error\":"+smbd::json(error.what())+"}\n",false);} catch(...) {}
             }
@@ -333,17 +361,18 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
         if(automation) automation->update(logic_ticks,memory);
         SDL_Event event;
         while(SDL_PollEvent(&event)) {
-            ui.event(event);input.event(event);
-            if(event.type==SDL_EVENT_KEY_DOWN && !event.key.repeat && event.key.scancode==SDL_SCANCODE_F8) {
+            const auto handled=ui.event(event);input.event(event);
+            if(!handled && event.type==SDL_EVENT_KEY_DOWN && !event.key.repeat && event.key.scancode==SDL_SCANCODE_F8) {
                 const auto utc_ms=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
                 request_capture(root/"build/captures"/std::format("frame-{}-{}",utc_ms,SDL_GetTicksNS()));
             }
-            if(event.type==SDL_EVENT_KEY_DOWN && !event.key.repeat && event.key.scancode==SDL_SCANCODE_F9) {
+            if(!handled && event.type==SDL_EVENT_KEY_DOWN && !event.key.repeat && event.key.scancode==SDL_SCANCODE_F9) {
                 if(performance.active()) stop_performance();else start_performance();
             }
         }
         if(performance.expired()) stop_performance();
-        input.capture(ui.visible);
+        if(!automation) input.bindings(settings.bindings);
+        input.capture(ui.active());
         const auto gain=settings.output_gain((SDL_GetWindowFlags(window.get())&SDL_WINDOW_INPUT_FOCUS)!=0);
         if(gain!=output_gain) {running->output_gain(gain);output_gain=gain;}
         if(capture_was_pending && !running->capture_status().pending) {
@@ -351,7 +380,7 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
             const auto& status=running->capture_status();
             if(!status.error.empty()) {
                 pending_window_capture.clear();
-                SDL_SetWindowTitle(window.get(),("Super Monkey Ball Deluxe | Capture failed: "+status.error).c_str());
+                ui.message("Capture failed: "+status.error);
             }
         }
         input.update();
@@ -372,6 +401,8 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
         {smbd::PerfScope scope(&performance,smbd::PerfPhase::publish);renderer.publish_frame();}
         last_source=smbd::FrameClock::Clock::now();if(!frames) first_source=last_source;
         ++frames;
+        if(frames==1) startup_phase("first game frame");
+        if(restart_at && !restarting && frames>=restart_at) ui.restart=true;
         if(!motion_report.empty() && logic_ticks>=motion_at && motion_samples.size()<motion_frames) {
             const auto value=[&](std::uint32_t address) {return std::bit_cast<float>(memory.load<std::uint32_t>(address));};
             const auto ordinary=[](std::uint32_t address) {return address>=0x10000 && address<=0x03FFF000;};
@@ -380,10 +411,13 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
             const auto sample_frame=ordinary(animation)?value(animation+0x4C):-1.0f;
             const auto sample_speed=ordinary(animation)?value(animation+0x48):-1.0f;
             const auto counters=running->performance_counters();
-            motion_samples.push_back(std::format("{{\"frame\":{},\"ticks\":{},\"seconds\":{:.9f},\"delta\":{:.9g},\"scene\":{},\"ball_state\":{},\"ball\":[{:.9g},{:.9g},{:.9g}],\"matrix\":[{:.9g},{:.9g},{:.9g}],\"camera\":[{:.9g},{:.9g},{:.9g}],\"stage_time\":{:.9g},\"animation_frame\":{:.9g},\"animation_speed\":{:.9g},\"draws\":{}}}",
+            motion_samples.push_back(std::format("{{\"frame\":{},\"ticks\":{},\"seconds\":{:.9f},\"delta\":{:.9g},\"scene\":{},\"ball_state\":{},\"ball\":[{:.9g},{:.9g},{:.9g}],\"matrix\":[{:.9g},{:.9g},{:.9g}],\"camera\":[{:.9g},{:.9g},{:.9g}],\"stage_time\":{:.9g},\"animation_frame\":{:.9g},\"animation_speed\":{:.9g},\"draws\":{},\"rule_tick\":{},\"mode\":{},\"mode_timer\":{},\"course_flags\":{},\"ball_flags\":{},\"ape_flags\":{},\"replay_time\":{:.9g},\"camera_state\":{},\"velocity\":[{:.9g},{:.9g},{:.9g}],\"requested_animation\":{},\"current_animation\":{},\"animation_end\":{:.9g},\"animation_loops\":{}}}",
                 frames,logic_ticks,std::chrono::duration<double>(last_source-first_source).count(),smbd::frame_step.delta,memory.load<std::uint16_t>(0x6C9288),memory.load<std::uint8_t>(0x738DF3),
                 value(0x738DF4),value(0x738DF8),value(0x738DFC),value(0x738E2C),value(0x738E3C),value(0x738E4C),
-                value(0x73F1A0),value(0x73F1A4),value(0x73F1A8),value(0x72FF84),std::isfinite(sample_frame)?sample_frame:-1,std::isfinite(sample_speed)?sample_speed:-1,counters[0]));
+                value(0x73F1A0),value(0x73F1A4),value(0x73F1A8),value(0x72FF84),std::isfinite(sample_frame)?sample_frame:-1,std::isfinite(sample_speed)?sample_speed:-1,counters[0],
+                smbd::frame_step.logic,memory.load<std::uint32_t>(0x6C9354),std::bit_cast<std::int32_t>(memory.load<std::uint32_t>(0x6C92F0)),memory.load<std::uint32_t>(0x6C92F8),
+                memory.load<std::uint32_t>(0x738E88),ordinary(ape)?memory.load<std::uint32_t>(ape+0x248):0,value(0x8AFA90),memory.load<std::uint8_t>(0x73F1BE),
+                value(0x738E0C),value(0x738E10),value(0x738E14),ordinary(ape)?memory.load<std::uint32_t>(ape+0x70):0,ordinary(ape)?memory.load<std::uint32_t>(ape+0x7C):0,ordinary(animation)?value(animation+0x50):0,ordinary(animation)?memory.load<std::uint32_t>(animation+0x54):0));
         }
         const auto rate=presentation_rate(settings,ui);
         if(!rate || rate>=60 || display_clock.due(rate,last_source)) display_frame();
@@ -409,7 +443,9 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
     host.frames=[&] {return frames;};
     host.presented_frames=[&] {return presented_frames;};
     smbd::Xbox xbox(image,memory,ram,settings.disc_path(),std::move(host));
+    startup_phase("platform ready");
     running=&xbox;
+    if(!performance_output.empty() && performance_at==0) {automatic_performance_requested=true;start_performance();}
     if(!call_trace.empty()) smbd::enable_call_trace();
     const auto result=xbox.run(0);
     stop_performance();
@@ -418,7 +454,7 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
         for(const auto& sample:motion_samples) {if(!samples.empty()) samples+=',';samples+=sample;}
         smbd::write_text(motion_report,std::format("{{\"format\":\"smbd-motion-report-v1\",\"source_sha256\":{},\"refresh_rate\":{},\"interpolation\":false,\"samples\":[{}]}}\n",smbd::json(image.sha256),settings.refresh_rate,samples),false);
     }
-    if(ui.restart) return 4;
+    if(ui.restart) {startup_phase("restart requested");return 4;}
     smbd::diagnostic_record("{\"type\":\"run_end\",\"boundary\":"+smbd::json(result.boundary)+
         ",\"guest_eip\":"+smbd::json(smbd::hex32(result.cpu.eip))+",\"frames\":"+std::to_string(result.frames)+
         ",\"draws\":"+std::to_string(result.draws)+'}');
@@ -433,14 +469,14 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
         output<<smbd::boot_report(image,result)<<'\n';
     }
     if(result.boundary!="Native window closed" && !automated) {
-        running->output_gain(0);ui.visible=true;ui.category=4;ui.message("Game stopped: "+result.boundary);
+        running->output_gain(0);ui.visible=true;ui.category=6;ui.message("Game stopped: "+result.boundary);
         const auto utc=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         const auto failure=root/"build/logs"/std::format("game-stopped-{}.json",utc);
         smbd::write_text(failure,smbd::boot_report(image,result)+'\n',false);ui.message("Details saved: "+smbd::path_text(failure));
         while(!ui.quit) {
             SDL_Event event;while(SDL_PollEvent(&event)) {
-                ui.event(event);
-                if(event.type==SDL_EVENT_KEY_DOWN && !event.key.repeat && event.key.scancode==SDL_SCANCODE_F8) capture_launcher();
+                const auto handled=ui.event(event);
+                if(!handled && event.type==SDL_EVENT_KEY_DOWN && !event.key.repeat && event.key.scancode==SDL_SCANCODE_F8) capture_launcher();
             }
             if(!renderer.display()) {SDL_Delay(10);continue;}
             ui.draw(false,false,0,capture_launcher,[]{});

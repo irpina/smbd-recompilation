@@ -285,3 +285,185 @@ working goal triggers and pause/resume. Final source build is
 build/logs/hr-ball-states-build.txt; native CPU checks are
 build/checks/hr-ball-states-cpu.json (18 passed). Both executables use three
 compiler/LLD/ThinLTO workers. Changes remain uncommitted for manual checking.
+
+High-refresh corrections, 2026-10-30 (same verified executable):
+
+The fade at 76E80 decrements its remaining-frame counter at 76ECB. It was
+running once per scene, reaching its solid-black hold before the surrounding
+60 Hz transition finished. That decrement now retains rule cadence. The
+72350 text/task controller also retains rule cadence; its calls measure text
+and update layout, while 72810 performs the subsequent drawing.
+
+The character controller 2A13B0 mixes input handling with the presentation
+section at 2A22D2. This section submits the six yellow-circle/player-marker
+draws that disappeared between controller ticks. Intermediate scenes now enter
+that original presentation section after its original prologue. Five live
+controller results at local offsets 18/24/2C/34/4C are retained from the last
+rule update; other locals and drawing data are rebuilt. The original frame is
+A4 bytes plus four saved registers. Menu eligibility resets each rule tick.
+
+ITEM's common countdowns at 2584F9 and banana state logic at 258F08 retain
+rule cadence. Banana 258F00 samples position and rotation every scene. The
+velocity is the LEFT operand of ADDs 258FB9/258FC4/258FF3; its signed 16-bit
+increments retain fractional angular units across scene subdivisions.
+
+Moving stage groups have their OWN integer clock at group+4, advanced by
+7F569/7F56C/7F56F/7F574. Converting only the global stage clock left these
+groups running at scene frequency. Their counters now retain rule cadence;
+7F5E2 supplies a continuous, bounded per-group clock to the original curve
+sampler. Direction, double speed, clamps, resets and pauses are preserved.
+Conveyor offsets used for the previous transform at 7F9AC/7F9EA/7FA28 use the
+same interval. Existing 7B320 surface-velocity normalization remains in place.
+
+Evidence: bounded native analyses in build/logs/hr-issues-* and streaming
+reads of the three user captures. No new original call sites were unresolved.
+CPU checks: build/checks/hr-issues-verified-cpu.json, 20 cases passed.
+Clock-only checks: hr-issues-verified-timing.json, 29 checks passed.
+Snapshot probes execute the actual banana and fade routines. After two
+seconds, banana yaw is 9800 from B800 at both 60 and 360 scene steps/second.
+One original tick and six fractional scenes both reduce a 30-tick fade to 29.
+Probe recipes/results use hr-issues-final-banana-* and hr-issues-fade-*.
+The existing probe tool now accepts explicit timestep/phase/rule-tick inputs.
+
+The hidden/muted 360-limit character run completed all input barriers and
+recorded 512 consecutive scenes, all with 630 draws. It spans ticks 1120..1241
+over 2.026 seconds, with fractional steps and no missing six-marker frames.
+Files: build/checks/hr-issues-layout-character*. Native call traces optionally
+count intermediate versus rule-tick UI calls. Compilation/linking use three
+workers, as requested. Full transition-video parity still needs manual review;
+a single black capture during its hold is not a visual-parity result.
+
+The final game/tool builds are hr-issues-verified-build.log and
+hr-issues-verified-tool-build.log. All 10628 functions remain compiled, with
+the same three unresolved original sites and none introduced.
+Silent 60/360-limit Practice runs selected World 1 / 7 WIDE BRIDGE, completed
+all ten menu barriers, and recorded 512/1024 gameplay scenes respectively.
+Their neutral captures are hr-issues-bridge-{60,360}/frame-v3.png. The scripted
+stick input did not move the ball in these runs; neither they nor the later
+60-limit exercise attempt are claimed as moving-contact acceptance. Native
+surface-velocity and group-clock checks pass, but a manual bridge-contact
+check remains necessary.
+
+Follow-up corrections, 2026-10-30 (same executable SHA256):
+
+The user confirmed frame-1793399641031-15088798100 is the working 60 Hz
+reference for the three-mask wipe. A current 360 Hz reproduction still had
+zero-depth masks. Native write traces proved that 29F2F0 never issued the
+mask-enable commands at 29F3F5. It polls stream cue numbers 1/3/5 through
+EA730/EC230. Callback EC360 counted every rendered scene at EC373, advancing
+its B4/B8 cue clock before those 60 Hz consumers could see the cues. The
+clock block EC366..EC3D4 now follows rule ticks; the voice/completion cleanup
+at EC3DA and the original return still execute on intermediate scenes.
+Snapshot probes hr-followup-cues-{60,360}.json match all 60 successive rule
+samples exactly, ending at counter 60/cue 9. The silent 360-limit run's
+hr-followup-wipe-360/fixed-capture/frame.png shows all three openings, with
+draws 183..185 at depth -0.1 instead of zero. This is a rendered result, not
+a frame-rate or complete transition-video acceptance claim.
+
+Banana ADDSS sites 258F8A/258FD0/258FE7 also have velocity on the LEFT and
+position on the RIGHT. The earlier conversion scaled the position, collapsing
+all seven bananas to the origin. Only velocity is now scaled. Probes from
+the original spread-out capture retain every banana's XYZ exactly at both
+60/360 Hz. A one-second nonzero-velocity probe ends at (1.875,-0.4375,-14.25),
+with maximum 60/360 position difference below 0.00007. Recipes/results are
+build/checks/hr-followup-banana-{60,360}.*.
+
+The actual main collision routine 7E300 duplicates 7B320's return-to-world
+velocity conversion at 7EB1B/7EB33/7EB4D. Those three additions also require
+displacement/step before adding the original velocity. Fixing only 7B320 left
+the two sides inconsistent and injected velocity when leaving a moving group.
+The existing native platform case now exercises 7B320 -> 7E300 for translation
+and rotation at 30..1000 Hz. Captured WIDE BRIDGE geometry additionally runs
+the original 8FE80 -> 8D530 physics/collision path with a group rotating by
+0.001 radians per original tick. Both 60/360 Hz runs retain contact with group
+1 on all 15 rule samples. After 0.25 seconds the position difference is below
+0.000063 and velocity difference below 0.0000013. Final accepted recipes and
+results are hr-followup-platform-contact-final-60.* and
+hr-followup-platform-contact-360.txt / hr-followup-platform-contact-final-360.json.
+These bounded native contact checks do not substitute for manual play.
+
+Game/tool builds: hr-followup-cues-build.log / hr-followup-cues-tool-build.log,
+three compiler/linker workers; 10628 functions, same three unresolved sites.
+Final checks: hr-followup-final-cpu.json (20 passed) and
+hr-followup-final-timing.json (29 passed). Temporary write tracing was removed.
+
+Replay timing follow-up (2026-10-31)
+
+Target SHA256:
+9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2.
+Evidence and bounded native recipes/results are in
+build/checks/replay-timing/. The silent baseline-144 run uses the existing
+hr-long-input.txt route and a separate copy of its save data. Its motion
+report contains the complete first goal/replay; the run returns 3 because
+the requested 4096 motion samples outlast the input, not because of a crash.
+
+Two completion events could miss their 60 Hz consumers. Goal mode 253B20
+needs the ape's 4000 flag before ball handler 8D8F0 sets ball flag 200.
+The baseline records this ball flag being consumed on an intermediate scene
+at tick 2804, leaving course flag 6C92F8:400 unset and forcing the full
+360-tick timeout. The event block at 8D910 now runs on rule ticks; its
+following motion still runs each scene. Separately, goal animation controller
+A2F50 calls 9AEA0, a one-frame end-window predicate, at A2FEF. The pose can
+cross that window and loop between controller ticks, repeating the entire
+celebration. Branch A2FF9 also accepts the original latched ape flag 2000,
+which 9C59E sets at the animation end and 9C66B clears when changing clips.
+The original animation speed, end prediction and controller cadence remain.
+The old completed-goal capture at frame-1793323391110-43566271600 supplies
+the valid character/assets for accepted-goal-completion.json: before-end,
+normal end-window, looped-between-ticks and intermediate-scene cases pass.
+
+Replay ball types 8/10 use 8CAF0 and the original fractional sampler 27A2E0.
+They now sample each scene. The countdown subtraction at 8CB22 uses the
+actual interval, velocity stores 8CB9A/8CBBC/8CC40 convert displacement back
+to original per-tick velocity, and age increment 8CCC7 stays on rule ticks.
+The original replay clock remains authoritative, including seeks/resets.
+INFO 13C80 uses the geometric queries 12F30/13180 during replay as well as
+live play. Its existing crossing latch now includes replay types 8/10, so
+crossings between rule ticks reach INFO once. Replay metadata already carrying
+ball flag 100 must not suppress that geometric check. This restores the
+original replay goal/celebration transition instead of running the clock to
+zero and dropping back into ordinary ball state 4.
+
+Recording at the first scene after each rule boundary had alternated between
+two and three scene intervals at 144 Hz. That made steady recorded movement
+alternate in speed. Original recorder 27C220 now receives positions and
+wrapped ball/world angles sampled at the actual rule boundary, using the
+verified previous-position fields and angle increments. A scoped helper
+restores all live fields immediately afterwards. There is no displayed-pose
+interpolation or new recording format. Native recording checks obtain x=1
+at the boundary from live x=1.25, restore x=1.25 exactly, preserve wrapped
+angles, and confirm that paused/intermediate calls do not advance recording.
+
+Replay camera variants 8 and 17..20 (AFF40/B03F0/B0580/B0800/B0A50) now
+update continuously with interval-correct response and damping. Damped
+displacement follows the fractional iterate of the original v*=r; p+=v
+sequence; fallout camera Y has its own coefficient at 402458. The adjacent
+moving-stage replay sample at 7F67E uses the same actual interval as the
+ball, matching the existing platform velocity conversion. All lowering
+sites verify original instruction bytes. Initializers and one-shot rules
+retain their original cadence.
+
+Accepted native probes compare 60 full steps with 360 fractional camera
+steps: maximum error 0.000168 for B03F0 and 0.000145 for AFF40. Playback
+position/velocity/clock differ by at most 0.000031 between one full step
+and six fractional steps. A seek agrees exactly with original sampler
+27A2E0. Pause leaves the replay clock, ball, camera and stage unchanged.
+The opt-in motion report now includes replay/mode/animation state so these
+events and velocities can be inspected without a live debugger.
+
+Final game/tool builds: completion-build.log / completion-tool-build.log,
+three compiler/linker workers, 10628 functions and zero unresolved sites.
+accepted-cpu-check.json passes 20 cases; accepted-timing-check.json passes
+29 clock checks. Silent accepted-{60,144,360} runs all exit 0 and finish
+the input route. On Ryzen 5 5600X / RTX 5060 Ti, native resolution, AA off,
+VSync off, their first goal-to-replay times are 3.063488, 3.059985 and
+3.066103 seconds, versus baseline 6.045280 seconds. All take 184 rule ticks
+and retain replay states 10 -> 5 -> 6, including the celebration.
+
+In the same steady section (replay clock 220..205), the baseline holds the
+position on 23 of 38 adjacent displayed samples and has a maximum adjacent
+Z-velocity jump of 0.147823. Accepted runs have no held positions and a
+maximum jump below 0.000317. Full values are in accepted-summary.json.
+accepted-144-capture/frame.png is the rendered replay sample. These are
+focused runtime/numeric checks, not manual visual confirmation or a 360 FPS
+performance claim. User settings and saves were not changed.

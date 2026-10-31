@@ -1,0 +1,114 @@
+Remaining Tennis dispatches and replay lifetime
+Executable SHA256:
+9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2
+
+Scope
+1E9798 selects an AI method from 5F2D98 using private player state +54.
+1EE1DA calls the primary action stored in the same player's +30 field.
+These are the 28C-byte private records starting at master+76C, where
+807DDC owns the master allocation. Child actors and input-header fields
+with the same offsets are separate objects.
+
+State and callback producers
+1ED2B0 allocates 1600 bytes and clears 580 DWORDs at 1ED2F5..1ED2FC.
+The complete 1EDDD0 reference/caller inventory has 32 direct callers,
+all passing states 0..27. The last previously missing caller, 1E1EDD,
+passes zero. 1EE420 and 1EE490 introduce states 0 and 4. 1EE440 uses
+master+270 to select the three stack constants 28,29,30.
+
+Master+270 starts zero. 1EDC17 stores zero; 1EDA3A copies menu byte
+8B2532, whose descriptor 92 has inclusive maximum 2. The menu's complete
+selected-row/override/save-restore audit proves this byte stays in 0..2.
+1F2720/1F2738/1F273A increment and take signed remainder by positive 3;
+the preceding nonnegative domain makes its result 0..2. No private
+player+270 coordinate write aliases this master field.
+
+The 31 descriptors at 5F4620..5F4CE7 are each 38 bytes. Their first words
+point to aligned rows in the 45-command, 18-byte-stride pool
+5F41E8..5F461F. Primary cursor +60 starts/reset to zero or increments
+one row. Kinds 2/3 introduce state 0 or command arguments 4/8. The first
+row beyond the command pool has kind 5F41E8, greater than 8: 1EE0C7/CA
+routes it to 1EE11A without advancing the cursor or publishing a callback.
+Thus no arbitrary animation-duration assumption is needed for the fence.
+1EDFC0 installs command+10 into private+30 at 1EE044/4C. Exactly 32
+kind-zero rows supply 22 distinct callbacks. Zero is constructor-only
+and checked at 1EE1C4/C7 before the call. The complete receiver/writer
+audit separates scalar fields, child actors and other script pools.
+
+The 31 words at 5F2D98..5F2E13 select exactly six methods:
+BA870,1E93D0,1E9520,1E9530,1E9720,1E99C0. Table bytes, all command
+literals and proof instruction bytes are checked against this executable
+when compiling. 1E99C0's tail also reaches 1E9800.
+
+Replay issue and correction
+1EAC70 captures all four private records, their separate child actors,
+and the ball into a 171C-byte slot. 1EAD30 restores them. Allocation
+1EAB60 reserves 181 slots; recording 1EAF70 uses only indices 0..179,
+writes before incrementing and sets full (+21C) only at the first wrap.
+Recording reset 1EAE70 resets head/full, retaining the allocation.
+
+1EAEB0 stops recording, saves the end in +218, and selects replay start
+zero for a nonfull history. Full histories already have every selectable
+slot initialized. Replay-eligible point endings occur after an enabled
+post-serve physical pass; capture precedes that pass. The capture/parent
+lifetime audit establishes at least one initialized slot for a nonfull
+eligible replay, including pause transitions. No 61/51-frame minimum is
+assumed here.
+
+1F09EF starts playback. During the 60/50-frame fade, 1F0AD6 tail-jumps
+to cursor helper 1EB0C0. That helper increments +210, compares with +218,
+and returns 1 on completion. The fade ignores that result. Its next
+frame's 1EB110 restores the selected slot unconditionally when storage
+exists. The ordinary playback phase, by contrast, consumes completion
+and clears playback before another restore.
+
+The recompiler now preserves the last captured index when that fade-only
+tail path returns completion for a nonfull history. It leaves the helper's
+registers, flags, return result and stack unchanged, and keeps the original
+fade timer. The ordinary playback phase then consumes completion normally.
+Full histories retain their original wrap/advance behavior: their initial
+end crossing is intentional, and every slot is initialized. Histories that
+outlast the fade execute unchanged. This is an explicit bounds correction
+to the recompiled game, not a claim that the original executable proves a
+minimum rally length. Original heap allocation can request MEM_NOZERO;
+unrecorded slots must not be assumed zero.
+
+The correction is limited to functions containing the original 1F0AD6
+tail and verified 1EB0C5/FD/108/10E instructions. The standalone cursor
+helper is unchanged. Together with write-before-advance capture, this
+preserves the private state/callback domains through every restored slot.
+No new runtime instruction decoding, callback guessing or no-op handler
+is introduced.
+
+Evidence retained locally
+build/logs/call-agents/late-game/1E9798-* and 1EE1DA-*: state callers,
+descriptor/command words, receiver/aggregate-store and replay references.
+build/logs/call-agents/late-game/menu-row-domain-proof.json and
+physics-ctx270-writer-contexts.json: menu and master selector lifetime.
+build/logs/call-agents/game/tennis-aim/lifetime-proof.json: 1249 master
+references, 169 owners and 193 complete receiver-scoped native CFGs.
+build/logs/call-agents/middleware/replay-capture-lifetime.json: allocation,
+recording, pause and parent-state ordering. Its old numeric dependency is
+superseded by the fade bounds correction, not promoted to a proven claim.
+build/logs/remaining-calls/: fresh native analysis, baseline, build logs,
+closure audit and focused CPU probe results for this change.
+
+Validation (2026-10-31)
+Analysis reports all 10628 functions compiled/closed and zero unresolved
+game sites, with no lost function, binding or target in the independent
+baseline audit. The now-complete game graph excludes binary floating-point
+helper 30FA27 and its dispatch 30FAB1 from all executable, TLS, native and
+verified callback roots. Its original AOT body remains available only for
+isolated diagnostics; no artificial target list was assigned to it.
+The audit's native root lookup was corrected to use the report's actual
+native_platform_api field, covering all 33 native platform bindings.
+
+Game and diagnostic tool builds used three compiler/ThinLTO workers.
+The existing CPU suite passes all 20 cases. Fourteen focused replay cases
+execute 240 AOT calls on both the prior and corrected implementations.
+They reproduce the old short-history overrun, then verify the corrected
+cursor, unchanged fade timers/phases, unchanged single-step registers and
+flags, full-ring wrapping, and the standalone cursor helper. A one-slot
+recording formerly advanced to index 60/50 over a full NTSC/PAL fade; it
+now remains at index zero. Full histories retain the same indices. No
+game window or computer-use session was opened for this validation.

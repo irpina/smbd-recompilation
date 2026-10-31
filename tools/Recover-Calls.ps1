@@ -63,7 +63,7 @@ function Confirm-GameReachability($Batch) {
     foreach($entry in @($proof.entry)+$fixedRoots+@($proof.tls_callbacks)){[void]$roots.Add($entry)}
     foreach($function in $Batch.functions) {
         $functions[$function.entry]=$function
-        if($function.native_api){[void]$roots.Add($function.entry)}
+        if($function.native_platform_api){[void]$roots.Add($function.entry)}
         foreach($entry in $function.static_callback_targets){[void]$roots.Add($entry)}
     }
     if(@(Lost @($roots) $proof.roots).Count -or @(Lost $proof.roots @($roots)).Count) {throw 'Game graph omitted a verified callback root.'}
@@ -247,7 +247,7 @@ try {
                     $expandedReopens.Add(@{entry=$old.entry;blocked_by=@($current.blocked_by)})
                 } else { $failures.Add(@{entry=$old.entry;kind='reopened_function'}) }
             }
-            if($old.native_api -ne $current.native_api) { $failures.Add(@{entry=$old.entry;kind='changed_native_binding'}) }
+            if($old.native_platform_api -ne $current.native_platform_api) { $failures.Add(@{entry=$old.entry;kind='changed_native_binding'}) }
             foreach($field in @('calls','static_callback_targets','kernel_ordinals')) {
                 if(($old[$field] -join ',') -ceq ($current[$field] -join ',')) { continue }
                 $lost = @(Lost $old[$field] $current[$field])

@@ -63,6 +63,7 @@ GameReachability close_dormant_dispatches(const Xbe& image,std::map<std::uint32_
     GameReachability result;result.roots.insert(image.entry);
     result.roots.insert(native_graphics_helpers.begin(),native_graphics_helpers.end());
     result.roots.insert(native_goal_queries.begin(),native_goal_queries.end());
+    result.roots.insert(native_menu_helpers.begin(),native_menu_helpers.end());
     if(image.tls) result.roots.insert(image.tls->callbacks.begin(),image.tls->callbacks.end());
     for(const auto& [entry,unit]:units) {
         // Conservatively include verified callbacks even in otherwise unused
@@ -111,7 +112,7 @@ void reachability_report(std::ostream& out,const Xbe& image,const GameReachabili
     out<<"{\"format\":\"smbd-game-reachability-v1\",\"closed\":"<<(proof.closed?"true":"false")
        <<",\"entry\":"<<json(hex32(image.entry))<<",\"fixed_native_roots\":[";
     bool first=true;
-    for(auto roots:{std::span<const std::uint32_t>(native_graphics_helpers),std::span<const std::uint32_t>(native_goal_queries)})
+    for(auto roots:{std::span<const std::uint32_t>(native_graphics_helpers),std::span<const std::uint32_t>(native_goal_queries),std::span<const std::uint32_t>(native_menu_helpers)})
         for(auto entry:roots) {if(!first) out<<',';first=false;out<<json(hex32(entry));}
     out<<"],\"tls_callbacks\":";
     if(image.tls) addresses(out,image.tls->callbacks);else out<<"[]";

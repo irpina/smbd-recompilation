@@ -1,5 +1,6 @@
 #pragma once
 #include "file.h"
+#include <map>
 #include <optional>
 
 namespace smbd {
@@ -26,6 +27,9 @@ public:
 private:
     File file_;
     DiscEntry root_;
-    std::vector<DiscEntry> directory(const DiscEntry& entry);
+    std::map<std::uint64_t,std::vector<DiscEntry>> directories_;
+    std::size_t directory_bytes_=0;
+    std::vector<DiscEntry> uncached_directory_;
+    const std::vector<DiscEntry>& directory(const DiscEntry& entry);
 };
 }

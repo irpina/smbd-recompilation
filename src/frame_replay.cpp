@@ -53,7 +53,7 @@ struct Json {
         if(result.ec!=std::errc{} || result.ptr!=value.data()+value.size()) throw std::runtime_error("Invalid capture address");
         return bits;
     }
-    Json at(std::string_view name) const {
+    Json at(std::string_view name,bool optional=false) const {
         if(text.empty() || text.front()!='{') throw std::runtime_error("Expected capture object");
         for(std::size_t i=1;i<text.size();) {
             if(text[i]==',' || std::isspace(static_cast<unsigned char>(text[i]))) {++i;continue;}
@@ -66,6 +66,7 @@ struct Json {
             if(key.string()==name) return {text.substr(i,finish-i)};
             i=finish;
         }
+        if(optional) return {};
         throw std::runtime_error("Missing capture field: "+std::string(name));
     }
     std::vector<Json> array(unsigned limit) const {
@@ -113,7 +114,7 @@ std::vector<std::byte> payload(const std::filesystem::path& root,Json name,std::
 }
 }
 std::string replay_frame(const std::filesystem::path& capture,const std::filesystem::path& output,
-                         std::string_view sha,std::uint32_t through,std::uint32_t only,bool join_arrays) {
+                         std::string_view sha,std::uint32_t through,std::uint32_t only,bool join_arrays,unsigned antialiasing,unsigned anisotropy) {
     const auto started=std::chrono::steady_clock::now();
     const auto original=load_image(capture/"frame.png");
     unsigned scale=1;
@@ -138,6 +139,9 @@ std::string replay_frame(const std::filesystem::path& capture,const std::filesys
         if(type=="header") {
             if(record.at("format").string()!="smbd-gpu-frame-v1" || record.at("source_sha256").string()!=sha)
                 throw std::runtime_error("Frame capture does not match the verified executable");
+            const auto aa=record.at("antialiasing",true),af=record.at("anisotropy",true);
+            renderer.enhancements(antialiasing==UINT32_MAX?(aa.text.empty()?0:aa.number()):antialiasing,
+                anisotropy==UINT32_MAX?(af.text.empty()?0:af.number()):anisotropy);
             verified=true;
         } else if(type=="release") retired.insert(record.at("resource").number());
         else if(type=="surface") {
@@ -260,8 +264,8 @@ std::string replay_frame(const std::filesystem::path& capture,const std::filesys
     save_png(actual,output/"frame.png");save_png(difference,output/"difference.png");
     const auto errors=renderer.errors();std::string messages;
     for(const auto& message:errors) {if(!messages.empty()) messages+=',';messages+=json(message);}
-    const auto result=std::format("{{\"format\":\"smbd-frame-replay-v1\",\"source_sha256\":{},\"adapter\":{},\"passed\":{},\"draws\":{},\"captured_draws_selected\":{},\"join_arrays\":{},\"pixels_changed_from_capture\":{},\"replay_ms\":{},\"errors\":[{}]}}",
-        json(sha),json(renderer.adapter()),errors.empty(),draws,selected,join_arrays,changed,std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count(),messages);
+    const auto result=std::format("{{\"format\":\"smbd-frame-replay-v1\",\"source_sha256\":{},\"adapter\":{},\"passed\":{},\"draws\":{},\"captured_draws_selected\":{},\"join_arrays\":{},\"antialiasing\":{},\"anisotropy\":{},\"pixels_changed_from_capture\":{},\"replay_ms\":{},\"errors\":[{}]}}",
+        json(sha),json(renderer.adapter()),errors.empty(),draws,selected,join_arrays,renderer.stats().antialiasing,renderer.stats().anisotropy,changed,std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count(),messages);
     write_text(output/"report.json",result+'\n',false);return result;
 }
 }

@@ -57,8 +57,10 @@ struct RenderState {
     std::array<std::int32_t,4> scissor{};
     std::array<std::uint32_t, 4> textures{}, texture_modes{}; // NV097 texture shader modes.
     std::array<std::uint32_t, 4> texture_sources{}, texture_clip{};
+    std::array<Float4,4> bump_matrices{}; // M00, M01, M10, M11; normalized texture units.
     std::array<std::uint32_t, 4> texture_address{0x030303, 0x030303, 0x030303, 0x030303};
     std::array<bool, 4> linear_filter{}, alpha_kill{};
+    std::array<std::uint32_t,4> texture_filter{},texture_control{0x0003FFC0,0x0003FFC0,0x0003FFC0,0x0003FFC0};
     std::uint32_t combiner_control = 0;
     std::array<std::uint32_t, 8> color_inputs{}, alpha_inputs{}, color_outputs{}, alpha_outputs{};
     std::array<std::uint32_t, 8> factor0{}, factor1{};
@@ -88,6 +90,7 @@ struct RenderStats {
     std::uint64_t texture_bytes=0,target_bytes=0;
     std::uint32_t texture_slots=0;
     std::uint32_t resolution_scale=1;
+    std::uint32_t antialiasing=0,anisotropy=0;
     std::uint64_t total_vertex_bytes=0,texture_uploads=0,texture_upload_bytes=0,target_creations=0,target_copies=0;
     std::uint64_t buffer_maps=0,state_misses=0,layout_misses=0,sampler_misses=0,program_creations=0;
 };
@@ -115,6 +118,8 @@ public:
     void copy_to_main();
     void resize(std::uint32_t width, std::uint32_t height);
     void aspect_ratio(float);
+    void enhancements(unsigned antialiasing,unsigned anisotropy); // AA: off, FXAA low/medium/high, MSAA 2/4/8x. AF: original or 1/2/4/8/16x.
+    bool supports_msaa(unsigned samples) const;
     void attach_window(void* native_window);
     void publish_frame(); // Retain one complete source image, independent of subsequent guest draws.
     bool display(bool published=false,bool wait=true);
@@ -156,7 +161,7 @@ private:
 };
 
 std::string check_render(const std::filesystem::path& directory, bool warp, bool debug);
-std::string check_image_copy(bool warp,bool debug);
+std::string check_image_copy(bool warp,bool debug,unsigned antialiasing=0);
 std::string render_texture(const std::filesystem::path& input, TextureFormat format,
                            std::uint32_t width, std::uint32_t height,
                            const std::filesystem::path& output, bool warp);
