@@ -39,7 +39,7 @@ OpenAI Codex has assisted with development and research. Changes are checked usi
 ### What still needs work
 
 - Testing every stage, game mode, and progression path. Party games have not been fully validated.
-- Remaining original call targets and native Xbox services. The latest generation compiles 10,628 functions with three unresolved indirect call sites; that count is not a measure of overall completeness.
+- Remaining original native Xbox services.
 - Wider visual, audio, and gameplay comparisons against the original Xbox release.
 - Sustained 360 Hz performance. Selecting a refresh rate does not guarantee the hardware can reach it.
 - Native Linux and macOS implementation and hardware validation.
