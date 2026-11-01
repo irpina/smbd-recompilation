@@ -78,6 +78,7 @@ public:
     PerfCounters performance_counters() const;
     void performance_recording(bool);
     void output_gain(float);
+    void aspect_ratio(unsigned mode);
 private:
     friend void native_platform(Cpu&,Memory&,std::uint32_t);
     friend void native_frame_wait(Cpu&,Memory&);

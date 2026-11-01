@@ -11,12 +11,21 @@
 #include <charconv>
 #include <cmath>
 #include <chrono>
+#include <cstdio>
 #include <fstream>
 #include <format>
 #include <iostream>
 #include <Windows.h>
 
 namespace {
+void attach_parent_console() noexcept {
+    const bool output_missing=_fileno(stdout)<0,error_missing=_fileno(stderr)<0;
+    if((!output_missing && !error_missing) || !AttachConsole(ATTACH_PARENT_PROCESS)) return;
+    // Reconnect only missing streams; inherited files and pipes must stay intact.
+    FILE* stream=nullptr;
+    if(output_missing && !freopen_s(&stream,"CONOUT$","w",stdout)) std::cout.clear();
+    if(error_missing && !freopen_s(&stream,"CONOUT$","w",stderr)) std::cerr.clear();
+}
 struct Sdl {
     Sdl() {if(!SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMEPAD)) throw std::runtime_error(SDL_GetError());}
     ~Sdl() {SDL_Quit();}
@@ -146,6 +155,36 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
     renderer.attach_window(SDL_GetPointerProperty(SDL_GetWindowProperties(window.get()),SDL_PROP_WINDOW_WIN32_HWND_POINTER,nullptr));
     smbd::SettingsUi ui(window.get(),renderer,settings,settings_path);
     if(!settings_error.empty()) ui.message(settings_error);
+    smbd::Xbox* running=nullptr;
+    int active_aspect=settings.aspect;
+    const auto graphics_changed=[&] {
+        const auto current=renderer.stats();
+        return unsigned(settings.resolution)!=current.resolution_scale || unsigned(settings.antialiasing)!=current.antialiasing ||
+            unsigned(settings.anisotropy)!=current.anisotropy || settings.aspect!=active_aspect;
+    };
+    const auto applied_settings=[&] {
+        auto applied=settings;const auto current=renderer.stats();
+        applied.resolution=int(current.resolution_scale);applied.antialiasing=int(current.antialiasing);
+        applied.anisotropy=int(current.anisotropy);applied.aspect=active_aspect;
+        return applied;
+    };
+    const auto apply_graphics=[&] {
+        if(!graphics_changed()) return;
+        try {
+            renderer.image_quality(settings.resolution,settings.antialiasing,settings.anisotropy);
+            if(settings.aspect!=active_aspect) {
+                if(running) running->aspect_ratio(settings.aspect);
+                renderer.aspect_ratio(settings.display_aspect());active_aspect=settings.aspect;
+            }
+            smbd::diagnostic_record(std::format("{{\"type\":\"graphics_settings\",\"resolution_scale\":{},\"antialiasing\":{},\"anisotropy\":{},\"aspect_mode\":{},\"playing\":{}}}",
+                settings.resolution,settings.antialiasing,settings.anisotropy,active_aspect,running!=nullptr));
+        } catch(const std::exception& error) {
+            settings=applied_settings();
+            ui.message("Could not apply graphics settings: "+std::string(error.what()));
+            ui.category=6;ui.visible=true;
+            try {settings.save(settings_path);} catch(const std::exception& save_error) {ui.message(save_error.what());}
+        }
+    };
     // Prepare the UI shaders/font atlas before gameplay or performance recording.
     renderer.clear(0xFF100C06);renderer.display();ui.draw(false,false,0,[]{},[]{});renderer.present(false);
     startup_phase("settings ready");
@@ -195,6 +234,7 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
         }
         renderer.clear(0xFF100C06);if(!renderer.display()) {SDL_Delay(10);continue;}
         ui.draw(false,false,0,capture_launcher,[]{});
+        apply_graphics();
         if(!launcher_capture.empty()) {
             smbd::save_png(renderer.read_display(),launcher_capture/"window.png");settings.save(launcher_capture/"settings.cfg");
             smbd::write_text(launcher_capture/"window.json",window_diagnostic(window.get(),renderer,settings,muted,false,0,"",false,settings.aspect),false);
@@ -207,10 +247,7 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
         }
     }
     if(ui.quit) return 0;
-    if(static_cast<unsigned>(settings.resolution)!=renderer.stats().resolution_scale ||
-        static_cast<unsigned>(settings.antialiasing)!=renderer.stats().antialiasing ||
-        static_cast<unsigned>(settings.anisotropy)!=renderer.stats().anisotropy) return 4;
-    renderer.aspect_ratio(settings.display_aspect());
+    apply_graphics();
     ui.hide();
     startup_phase("game requested");
     smbd::Xbe image(settings.executable_path());
@@ -230,14 +267,11 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
     smbd::FrameClock::Time first_source{},last_source{},first_present{},last_present{};
     smbd::FrameClock display_clock;
     double fps=0;std::uint64_t fps_frames=0;auto fps_started=std::chrono::steady_clock::now();
-    const int active_scale=settings.resolution;
     const bool active_widescreen=settings.aspect!=0;
-    const int active_aspect=settings.aspect;
     float output_gain=-1;
     const auto deadline=seconds?std::chrono::steady_clock::now()+std::chrono::seconds(seconds):std::chrono::steady_clock::time_point::max();
     smbd::XboxHost host;
     smbd::Performance performance;
-    smbd::Xbox* running=nullptr;
     std::filesystem::path pending_window_capture;
     std::string window_capture_error;
     bool automatic_capture_requested=false,capture_was_pending=false;
@@ -269,7 +303,7 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
             const auto utc=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
             const auto directory=!performance_output.empty()?performance_output:root/"build/captures"/std::format("performance-{}-{}",utc,SDL_GetTicksNS());
             performance.save(directory);last_performance=directory;
-            settings.save(directory/"settings.cfg");
+            applied_settings().save(directory/"settings.cfg");
             if(benchmark_ticks && automatic_performance_requested)
                 smbd::write_text(directory/"benchmark.json",std::format("{{\"format\":\"smbd-benchmark-window-v1\",\"complete\":{},\"requested_ticks\":{},\"first_tick\":{},\"last_tick\":{},\"first_frame\":{},\"last_frame\":{},\"mode_changes\":{},\"ball_state_changes\":{},\"start\":{},\"end\":{}}}\n",
                     benchmark_complete,benchmark_ticks,benchmark_first_tick,logic_ticks,performance_first+1,frames,benchmark_mode_changes,benchmark_ball_changes,benchmark_start,benchmark_state()),false);
@@ -284,7 +318,7 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
     };
     const auto start_performance=[&] {
         if(!running || performance.active()) return;
-        performance.start(renderer.adapter(),settings.refresh_rate,active_scale,settings.vsync,running->performance_counters());
+        performance.start(renderer.adapter(),settings.refresh_rate,renderer.stats().resolution_scale,settings.vsync,running->performance_counters());
         renderer.performance(&performance,frames+1);performance_first=frames;
         if(benchmark_ticks) {
             benchmark_first_tick=logic_ticks;benchmark_start=benchmark_state();
@@ -300,7 +334,7 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
         try {
             running->capture_frame(std::filesystem::absolute(directory));capture_was_pending=true;
             if(performance.active()) performance.save(directory);
-            settings.save(directory/"settings.cfg");
+            applied_settings().save(directory/"settings.cfg");
             pending_window_capture=running->capture_status().directory/"window.png";window_capture_error.clear();
             smbd::write_text(directory/"window.json",window_diagnostic(window.get(),renderer,settings,muted,bool(automation),frames,image.sha256,true,active_aspect),false);
             smbd::diagnostic_record("{\"type\":\"frame_capture_requested\",\"directory\":"+smbd::json(smbd::path_text(running->capture_status().directory))+'}');
@@ -439,6 +473,10 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
         if(!frame_capture.empty() && !automatic_capture_requested && logic_ticks>=capture_at) {
             automatic_capture_requested=true;request_capture(frame_capture);
         }
+        if(graphics_changed() && !running->capture_status().pending) {
+            if(performance.active()) stop_performance();
+            apply_graphics();
+        }
     };
     host.frames=[&] {return frames;};
     host.presented_frames=[&] {return presented_frames;};
@@ -515,10 +553,17 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
 }
 }
 int wmain(int argc,wchar_t** argv) {
+    attach_parent_console();
     smbd::initialize_diagnostics();
     try {bool restarting=false;for(;;) {const int result=run(argc,argv,restarting);if(result!=4) return result;restarting=true;}}
     catch(const std::exception& error) {
         smbd::diagnostic_record("{\"type\":\"error\",\"message\":"+smbd::json(error.what())+'}');
-        std::cerr << error.what() << '\n';return 1;
+        std::cerr << error.what() << '\n';
+        if(argc==1 && _fileno(stderr)<0) {
+            auto message=std::string(error.what());
+            if(!smbd::diagnostic_log().empty()) message+="\n\nDetails saved: "+smbd::path_text(smbd::diagnostic_log());
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,"Super Monkey Ball Deluxe",message.c_str(),nullptr);
+        }
+        return 1;
     }
 }

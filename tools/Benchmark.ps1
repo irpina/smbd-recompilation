@@ -3,18 +3,25 @@ param(
     [ValidateRange(1,30)][int]$Seconds = 20,
     [string]$Storage = (Join-Path $PSScriptRoot '..\data\user'),
     [string]$Executable = (Join-Path $PSScriptRoot '..\build\windows\Release\smbd.exe'),
-    [string]$Output = (Join-Path $PSScriptRoot ('..\build\checks\composition-' + (Get-Date -Format 'yyyyMMdd-HHmmss')))
+    [string]$Output,
+    [ValidateSet('ProSkaters','Composition')][string]$Scene = 'ProSkaters'
 )
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$benchmarkScene = if($Scene -eq 'Composition') {
+    @{slug='composition';title='Practice / AIAI / Story World 2 / 3 Composition';world=1;stage=2}
+} else {
+    @{slug='pro-skaters';title='Practice / AIAI / Story World 4 / 1 PRO SKATERS';world=3;stage=0}
+}
+if(!$Output) { $Output=Join-Path $root ('build\checks\' + $benchmarkScene.slug + '-' + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
 $Storage = (Resolve-Path -LiteralPath $Storage).Path
 $Executable = (Resolve-Path -LiteralPath $Executable).Path
 $Output = [IO.Path]::GetFullPath($Output)
 if (Test-Path -LiteralPath $Output) { throw 'Use a new benchmark output directory.' }
-$inputPath = Join-Path $root 'knowledge\composition_input.txt'
+$inputPath = Join-Path $root $(if($Scene -eq 'Composition') {'knowledge\composition_input.txt'} else {'knowledge\pro_skaters_input.txt'})
 $settings = @(Get-Content -LiteralPath (Join-Path $root 'data\local\settings.cfg') |
-    Where-Object { $_ -notmatch '^(aspect|vsync|fullscreen|resolution|refresh_rate|muted|show_fps)=' })
-$settings += @('aspect=1','vsync=0','fullscreen=0','resolution=1','refresh_rate=360','muted=1','show_fps=0')
+    Where-Object { $_ -notmatch '^(aspect|vsync|fullscreen|resolution|refresh_rate|antialiasing|anisotropy|muted|show_fps)=' })
+$settings += @('aspect=1','vsync=0','fullscreen=0','resolution=1','refresh_rate=360','antialiasing=0','anisotropy=0','muted=1','show_fps=0')
 New-Item -ItemType Directory -Path $Output | Out-Null
 $settingsPath = Join-Path $Output 'settings.cfg'
 $settings | Set-Content -LiteralPath $settingsPath -Encoding utf8
@@ -33,20 +40,21 @@ try {
         $performancePath = Join-Path $directory 'performance'
         $consolePath = Join-Path $directory 'console.log'
         $timer = [Diagnostics.Stopwatch]::StartNew()
+        # Keep a pipeline so PowerShell waits for the windowed game and its exit code.
         & $Executable --hidden --mute --settings $settingsPath --storage $runStorage --input $inputPath `
             --benchmark-ticks ($Seconds * 60) --performance $performancePath --seconds ($Seconds + 120) `
-            --capture (Join-Path $directory 'composition.png') > $consolePath 2>&1
+            --capture (Join-Path $directory ($benchmarkScene.slug + '.png')) > $consolePath 2>&1 | Out-Null
         $exitCode = $LASTEXITCODE
         $timer.Stop()
-        if ($exitCode -ne 0) { throw "Composition run $run failed ($exitCode); see $consolePath" }
+        if ($exitCode -ne 0) { throw "$($benchmarkScene.title) run $run failed ($exitCode); see $consolePath" }
         $window = Get-Content -LiteralPath (Join-Path $performancePath 'benchmark.json') -Raw | ConvertFrom-Json
         $runResult = Get-Content -LiteralPath $consolePath -Tail 1 | ConvertFrom-Json
         if (!$runResult.controller_complete -or !$window.complete -or $window.last_tick - $window.first_tick -ne $Seconds * 60 -or
             $window.mode_changes -ne 0 -or $window.ball_state_changes -ne 0) { throw "Run $run left the benchmark window." }
         foreach ($state in @($window.start, $window.end)) {
             if ($state.mode -ne 51 -or $state.ball_state -ne 32 -or $state.character -ne 0 -or
-                $state.practice_category -ne 1 -or $state.practice_world -ne 1 -or $state.practice_stage -ne 2) {
-                throw "Run $run did not remain in AIAI / Practice / Story World 2 / Composition."
+                $state.practice_category -ne 1 -or $state.practice_world -ne $benchmarkScene.world -or $state.practice_stage -ne $benchmarkScene.stage) {
+                throw "Run $run did not remain in $($benchmarkScene.title)."
             }
         }
         $summary = (Get-Content -LiteralPath (Join-Path $performancePath 'performance.json') -Raw | ConvertFrom-Json).summary
@@ -61,9 +69,9 @@ try {
         }
     }
     [pscustomobject]@{
-        format='smbd-composition-benchmark-v1'; scene='Practice / AIAI / Story World 2 / 3 Composition'; target_hz=360
+        format='smbd-practice-benchmark-v1'; scene=$benchmarkScene.title; target_hz=360
         budget_ms=1000.0 / 360; warmup_ticks=120; measurement_ticks=$Seconds * 60
-        resolution_scale=1; widescreen=$true; vsync=$false; refresh_rate=360; target_sha256=$summary.target_sha256
+        resolution_scale=1; widescreen=$true; vsync=$false; refresh_rate=360; antialiasing=0; anisotropy=0; target_sha256=$summary.target_sha256
         executable_sha256=(Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash
         input_sha256=(Get-FileHash -LiteralPath $inputPath -Algorithm SHA256).Hash
         settings_sha256=(Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash

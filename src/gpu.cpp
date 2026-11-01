@@ -100,7 +100,7 @@ struct Gpu::Impl {
     VertexProgram program;
     VertexConstants constants{};
     ProgramVertex current{};
-    std::uint32_t program_load=0,constant_load=0,primitive=0,target=0;
+    std::uint32_t program_load=0,constant_load=0,primitive=0,target=0,prepared_program=0;
     std::uint32_t array_first=0,array_count=0,array_command=0,array_callsite=0;
     std::vector<std::uint32_t> indices,inline_words;
     struct Draw {
@@ -366,7 +366,13 @@ struct Gpu::Impl {
         draw.view.depth_scale=constants[58][2];
         if(draw.view.depth_scale<=0) throw std::runtime_error("NV097 viewport depth scale was not initialized");
         draw.state=state(draw.view);
-        const auto shader=prepare_gpu_program(renderer,registers[0],program);
+        // A program handle remains valid until its instruction memory or entry
+        // changes. Ordinary constants and vertex streams do not change shaders.
+        std::uint32_t shader;
+        if((reg(0x1E94)&3)==2) {
+            if(!prepared_program) prepared_program=renderer.prepare_program(program);
+            shader=prepared_program;
+        } else shader=prepare_gpu_program(renderer,registers[0],program);
         VertexLayout layout{};
         std::array<std::uint32_t,16> bases{},strides{};
         unsigned inline_stride=0;
@@ -486,7 +492,7 @@ struct Gpu::Impl {
         if(classes[subchannel]!=0x97) {
             auto& state=object_state.at(objects[subchannel]);state[method/4]=data;
             if(method==0x104) throw std::runtime_error("Native 2D object notification is not bound");
-            if(method==0x110) {flush();fence(0,0);poll(true);return;}
+            if(method==0x110) {flush();return;}
             if(method<0x300) return;
             // These commands set inputs for a later 2D operation. Preserve the
             // object-local state, including when it is rebound to a channel.
@@ -578,11 +584,16 @@ struct Gpu::Impl {
         else if(method>=0xA20 && method<=0xA2C) constants[59][(method-0xA20)/4]=real(data);
         else if(method>=0xAF0 && method<=0xAFC) constants[58][(method-0xAF0)/4]=real(data);
         else if(method==0x1E9C) program_load=data;
-        else if(method==0x1EA0) program.start=data;
+        else if(method==0x1EA0) {
+            if(program.start!=data) prepared_program=0;
+            program.start=data;
+        }
         else if(method==0x1EA4) constant_load=data;
         else if(method>=0xB00 && method<=0xB7C) {
             if(program_load>=program.tokens.size()) throw std::runtime_error("NV097 program upload outside instruction memory");
-            const auto lane=((method-0xB00)/4)%4;program.tokens[program_load][lane]=data;if(lane==3) ++program_load;
+            const auto lane=((method-0xB00)/4)%4;
+            if(program.tokens[program_load][lane]!=data) prepared_program=0;
+            program.tokens[program_load][lane]=data;if(lane==3) ++program_load;
         } else if(method>=0xB80 && method<=0xBFC) {
             if(constant_load>=constants.size()) throw std::runtime_error("NV097 constant upload outside context memory");
             const auto lane=((method-0xB80)/4)%4;constants[constant_load][lane]=real(data);if(lane==3) ++constant_load;
@@ -606,7 +617,13 @@ struct Gpu::Impl {
         } else if(method==0x100 && (data==6 || data==7)) {
             if(!owner.completion) throw std::runtime_error("Native graphics completion callbacks are not bound");
             fence(reg(0x1D8C),reg(0x1D90),true);
-        } else if(method==0x110) {flush();fence(0,0);poll(true);}
+        } else if(method==0x110) {
+            // WAIT_FOR_IDLE orders GPU commands, rather than blocking the guest
+            // CPU. Draws/copies share one ordered D3D11 immediate context, with
+            // private uploads retaining each draw's data. Submit the pending
+            // draws here; semaphore/callback fences still track real completion.
+            flush();
+        }
         else if(method==0x12C) {
             flush();select_target();renderer.copy_to_main();target=0;++statistics.flips;
             if(capture.pending) capture_flip();
@@ -696,7 +713,11 @@ void Gpu::submit(std::uint32_t begin,std::uint32_t end,std::uint32_t callsite) {
                 const auto bytes=count*4;
                 const auto* source=commands+(begin-source_begin);
                 std::memcpy(g.registers[0].data()+first/4,source,bytes);
-                if(code) std::memcpy(g.program.tokens.data()+load,source,bytes);
+                if(code) {
+                    auto* destination=g.program.tokens.data()+load;
+                    if(std::memcmp(destination,source,bytes)) g.prepared_program=0;
+                    std::memcpy(destination,source,bytes);
+                }
                 else std::memcpy(g.constants.data()+load,source,bytes);
                 load+=count/4;g.statistics.methods+=count;
                 if(g.capture_active) g.command_address=begin+bytes-4;
@@ -721,9 +742,17 @@ void Gpu::submit(std::uint32_t begin,std::uint32_t end,std::uint32_t callsite) {
             g.method(subchannel,method,load(begin));begin+=4;
         }
     }
-    g.flush();g.renderer.native_context()->Flush();g.poll(false);
+    // Track the entire submitted batch for IsBusy, including work after the
+    // last guest semaphore. This event is polled; it never stalls submission.
+    g.fence(0,0);g.renderer.native_context()->Flush();g.poll(false);
 }
 bool Gpu::busy() {auto& g=*impl_;g.poll(false);return g.fence_count!=0;}
+bool Gpu::time_pending(std::uint32_t address,std::uint32_t issued,std::uint32_t requested) {
+    auto& g=*impl_;g.poll(false);
+    // 320997..3209AE compares distances from the SDK's next timestamp. Keep
+    // unsigned subtraction so completed requests also work across 32-bit wrap.
+    return issued-requested<issued-g.memory.load<std::uint32_t>(address);
+}
 void Gpu::wait() {auto& g=*impl_;g.emit_arrays();g.flush();g.fence(0,0);g.poll(true);}
 void Gpu::snapshot() {
     auto& g=*impl_;g.emit_arrays();g.flush();
@@ -882,6 +911,15 @@ std::string Gpu::check_texture_cache() {
     gpu.submit(0x1000,0x1000+static_cast<unsigned>(commands.size()*4));gpu.wait();
     expect("graphics callbacks preserve packet order, target, context and preceding fences",ordered &&
         notifications==std::vector<std::pair<std::uint32_t,std::uint32_t>>{{0x1234,0xAA},{0x5678,0xBB}} && g.statistics.callbacks==2);
+    memory.store<std::uint32_t>(0x380,17);
+    bool timestamps=!gpu.time_pending(0x380,21,17) && !gpu.time_pending(0x380,21,15) && gpu.time_pending(0x380,21,19);
+    memory.store<std::uint32_t>(0x380,0xFFFFFFFD);
+    timestamps&=gpu.time_pending(0x380,3,0xFFFFFFFF);
+    g.fence(0x380,1);gpu.wait();
+    const auto completed_fences=g.statistics.fences;
+    timestamps&=!gpu.time_pending(0x380,3,0xFFFFFFFF) && !gpu.time_pending(0x380,3,1) && gpu.time_pending(0x380,3,3);
+    expect("SDK timestamp completion preserves pending, completed and wrapped requests without adding fences",
+        timestamps && g.statistics.fences==completed_fences);
     struct Upload {unsigned first,count,load;bool repeat;};
     constexpr std::array uploads{Upload{0xB00,32,128,false},Upload{0xB80,32,184,false},
         Upload{0xB00,4,135,false},Upload{0xB80,4,191,false},Upload{0xB04,3,135,false},Upload{0xB84,3,191,false},

@@ -1,0 +1,135 @@
+PRO SKATERS performance benchmark, 2026-10-31
+
+Target executable SHA256:
+9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2
+
+The default benchmark is now Practice > AIAI > Story World 4 > 1 PRO SKATERS.
+Run tools/Benchmark.ps1. -Scene Composition retains the historical benchmark.
+Both routes use native 1x (640x480 internal) widescreen, VSync off, 360 Hz selected, AA off and
+original texture filtering. Each of three runs has 120 original ticks of warmup
+and 1200 measured ticks (20 seconds), with isolated copies of the source save.
+The 360 Hz target is 2.778 ms per fresh scene. Normal rules remain at 60 Hz.
+
+The World 4 route uses the previously verified Practice fields: category 1 at
+8B2468, zero-based world 3 at 8B246A, and first stage 0 at 8B2478 (8B2475+world).
+It waits for world confirmation at 8B2489 bit 0 and normal rolling state 32 at
+738DF3, then warms up. The original availability reads at 2A41F3..2A4203 and mode
+dispatch at 155F0/15820 are the same as the Composition research. The capture
+current-qualification.png independently labels the scene "4-1 PRO SKATERS".
+All 47 input steps and 10 state barriers passed. No guest/save values were patched.
+
+The older Composition save has World 4 locked. The newer normal save, updated
+by the user before this session, opens the stage. Its frozen source copy is in
+build/checks/performance-pro-skaters/source-storage; all checks use private copies.
+Normal progress and display settings remain unchanged. Automated runs are hidden
+and muted; no computer-use tools or subagents are used.
+
+Artifacts: build/checks/performance-pro-skaters. Hardware: Windows x64,
+AMD Ryzen 5 5600X / NVIDIA GeForce RTX 5060 Ti. Three baseline median/p99 pairs
+were 7.4961/10.8600, 8.0065/11.5772 and 7.9935/10.6852 ms. GPU medians were
+1.716480, 1.733600 and 1.693760 ms. The matching native thread profile collected
+10297 samples over 15 seconds. Guest code was the largest phase, followed by GPU
+waits. The largest individual engine routine was Gpu::submit; translated 21BE0
+was the largest guest routine. These profiles predate the optimizations below.
+
+Synchronization corrections:
+1. D3D_BlockOnTime previously submitted/drained all GPU work unconditionally.
+   Original 320997..3209AE reads the real completion word through device+30,
+   then returns when (issued-requested) >= (issued-completed), using unsigned
+   32-bit subtraction. The native binding now performs that exact completed-
+   timestamp check after polling real native completion events. Pending requests
+   retain the real full-completion wait. An existing GPU diagnostic now also
+   checks completed, pending and wrapped timestamps without adding fences.
+2. Method 110 (WAIT_FOR_IDLE) is GPU command ordering, not a CPU wait. Both native
+   graphics paths now submit pending draws to their single D3D11 immediate
+   context. Private uploads retain each draw's data; D3D11 handles native resource
+   dependencies. CPU-visible semaphores/callbacks still use real completion
+   events, and explicit CPU waits/readbacks retain their completion behavior.
+   A nonblocking end-of-submission event keeps IsBusy aware of the whole native
+   batch, including work after the last guest semaphore. The existing 64-event
+   queue remains bounded; there is no per-barrier CPU completion wait.
+
+The D3D11 mapping relies on the fixed observable pipeline order and native
+read-after-write dependency handling in Microsoft's functional specification,
+sections 4.2 and 5.6.7:
+https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm
+Flush is asynchronous; explicit event queries provide CPU completion:
+https://learn.microsoft.com/en-us/windows/win32/api/d3d11/nf-d3d11-id3d11devicecontext-flush
+Independent register/behavior reference: NV097_WAIT_FOR_IDLE=110 and the GPU
+surface-update method in xemu's pgraph.c (not an original-game visual reference):
+https://github.com/xemu-project/xemu/blob/master/hw/xbox/nv2a/pgraph/pgraph.c
+
+The timestamp-only probe measured 7.1485/8.0154 ms. With both corrections, three
+medians were 5.5175, 5.5132 and 5.3141 ms (barrier/benchmark.json).
+GPU wait wall time dropped to about 0.003 ms/scene; guest execution remained
+about 3 ms/scene. The original 940-draw baseline frame replayed with zero changed
+pixels. A new live 922-draw frame also independently replayed with zero changed
+pixels and no D3D11 errors. All 20 CPU, 16 texture/packet/timestamp and 16 bump
+checks passed. No test files/framework were added.
+
+Final CPU profile and validation:
+The existing Composition profile was merged with a new, verified 20-second
+PRO SKATERS training window, using one llvm-profdata worker. The instrumented
+training measurements are excluded from performance claims. The final build
+uses the resulting indexed profile without runtime instrumentation. The
+combined profile covers 18486 native functions and 240532 instrumented blocks.
+The profile refresh's small difference from the barrier-only runs is within
+their variation; no isolated CPU-profile speedup is claimed here.
+
+Three final independent 20-second windows:
+  Run 1: median/p99 5.3998/6.2426 ms; GPU median/p99 1.886624/2.370368 ms; peak RAM 286.785 MiB.
+  Run 2: median/p99 5.5122/6.4765 ms; GPU median/p99 1.864960/2.414496 ms; peak RAM 280.797 MiB.
+  Run 3: median/p99 4.8867/6.7533 ms; GPU median/p99 1.715456/2.552960 ms; peak RAM 283.859 MiB.
+The median of run medians fell 32.448%, from 7.9935 to 5.3998 ms. GPU wait wall
+time fell from 1.68..1.84 to 0.0031..0.0035 ms/scene. Guest CPU execution remains
+the largest cost at 2.84..3.07 ms/scene, followed by graphics-command processing
+at 1.06..1.13 ms, draw submission at 0.54..0.59 and uploads at 0.51..0.54 ms.
+All GPU timing records completed; no partial/pending records or dropped frames
+were present. End-to-end run durations were 48.728..48.749 seconds, including
+startup, loading/navigation, warmup and report/capture IO.
+The final capture's startup milestones reached SDL at 89.503 ms, renderer at
+368.804 ms, executable loaded at 446.628 ms, platform ready at 454.200 ms and
+first game frame at 774.667 ms from process startup (startup.json). This measures
+startup through the first game frame, not isolated PRO SKATERS stage loading.
+
+Workload caveat: this is a fixed stage and elapsed-time benchmark, not identical
+frame replay. Average draw counts were 936..1013 per baseline scene and 866..960
+per final scene. The first baseline/final pair closely matches draw workload
+(935.97 vs 937.30 draws, about 1.1% difference in vertices) and improves from
+7.4961 to 5.3998 ms, about 28%. Run 3's lighter draw workload contributes to its
+lower median. The larger three-run reduction includes this variation; the real
+GPU-wait reduction is independently visible in the phase reports. Neither this
+result nor the profile refresh establishes a universal gain for every scene.
+
+Every final window passed 47 input steps / 10 barriers and covered original ticks
+1659..2859 in mode 51, AIAI, Story world 3 / stage 0 (zero-based), ball state 32.
+No mode/ball-state changes, falls or resets occurred. With neutral input, the ball
+remains near (0, 2.3125, 24), with small position drift recorded in benchmark.json.
+A Composition control also passed: median/p99 3.1566/3.8251 ms, GPU median/p99
+0.961824/1.135552 ms. This is one control window, not a new three-run qualification.
+
+All 20 CPU and 43 graphics checks (16 texture/packet/timestamp, 16 bump/Gaussian,
+11 image-copy) passed. The final live PRO SKATERS frame independently replayed
+all 1015 draws with zero changed pixels and no D3D11 errors. Original-Xbox visual
+parity is not established by these capture/replay consistency checks. The final
+three-worker Game build passed with 10628 functions and no unresolved call sites;
+its executable hash matches all final benchmark windows. Both linkers retained
+/threads:3 and /opt:lldltojobs=3 with the shared bounded ThinLTO cache.
+
+Repeated dev-shell initialization also exceeded Windows' command-line length
+during the long profiling batch. Initialize-Toolchain.ps1 now reuses a matching
+x64 environment and adds its tool directories only once. Repeating setup leaves
+PATH unchanged; the subsequent final build passed without that error.
+
+The 360 Hz / 2.778 ms target remains unmet. The new default can be reproduced with
+tools/Benchmark.ps1, using a save with World 4 unlocked. For the frozen source:
+  tools/Benchmark.ps1 -Storage build/checks/performance-pro-skaters/source-storage
+Rebuild the current CPU profile with:
+  tools/Build.ps1 -Stage Game -AllowPartial -Workers 3 -CpuProfile build/checks/performance-pro-skaters/game.profdata
+Profile SHA256:
+7F60CA2D28BF9F7C99E6790CD1A9A5C99786DCC9977FB696B3CEBEA6BFD23324
+Final executable SHA256:
+0C0BF0714C57B12F1F542953DC8DCC70EA415B907C1AB9754855A7A1AC9BBBE2
+Main artifacts: baseline/, profile/, wait-analysis/, wait/, barrier/, final/,
+final-comparison.json, composition-control/, final-*.json, final-frame-replay/,
+pgo-generate-build.log, pgo-use-build.log, final-tool-build.log and verified-build.log.

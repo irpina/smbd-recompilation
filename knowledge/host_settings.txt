@@ -258,3 +258,70 @@ delivery-phases.jsonl and restart-phases.jsonl. --report emits opt-in startup
 phases; --performance-at 0 includes initialization in the existing recorder.
 The first partial frame is excluded from gameplay percentiles, so inspect
 its raw phase times and hot-operation totals when diagnosing startup.
+
+Live graphics settings (2026-11-01, same verified executable SHA-256)
+
+Resolution, AA, filtering and aspect changes now apply at completed frames.
+Render-target identifiers, shared colour images, ordinary textures and separate
+depth/stencil images survive resolution/sample-count changes. Native HLSL
+transfers retain their contents; all shader variants are compiled offline.
+Resource budgets are checked before allocation, and rejected choices retain the
+active resources/settings. An active performance recording is saved before a
+change; frame captures finish before resources are changed.
+
+Aspect updates retain the existing verified constants and backdrop adjustment.
+Original leaf ADCA0 (A04C936C0084C0) refreshes canvas 73F198/aspect 73F0EC;
+original ADD70 (8A154C936C00), verified as 23 instructions, refreshes the five
+camera aspects at 73F1D4 + 28C*i. Both take no arguments and return normally.
+They run on a checked scratch guest call frame without changing the live
+registers/floating state. All guest threads receive the current ultrawide flag.
+
+RTX 5060 Ti validation: check-image-copy passes 20 cases from both single-sample
+and MSAA8 initial states, including live FXAA/MSAA/scale changes, shared colour,
+D24S8/D16, RGB565 and budget rejection, with no D3D11 warnings/errors.
+check-presentation with XBE/ISO passes 424 checks and seven live option changes
+in one 192-frame, 4825-draw muted session, including 4:3/16:9/21:9 camera state.
+Artifacts: build/checks/live-graphics-20261101-110713. Hidden settings captures
+also pass all seven pages; no desktop automation is used.
+
+Windows release installer (2026-11-01, same verified executable SHA-256)
+
+tools/Package.ps1 builds with three workers and stages only CMake's Runtime
+component. The 14-file payload contains the native game/tool, application-local
+C++ runtime, branding, supported-target registry and notices. No ISO, XBE,
+preferences, saves, generated source or build/debug output is packaged.
+The standalone native installer shares the settings wood-grain generator and
+palette. Its own C++ runtime is static. CAB extraction reads the embedded
+archive through independent FDI file cursors and writes destinations using
+Unicode Windows APIs, avoiding SetupIterateCabinet's narrow cabinet-path
+handling. Every payload file is SHA-256 checked before deployment.
+
+Artifacts: build/checks/installer-20261101-114608/report.json. Verified Unicode
+install paths, installed-game boot, preferences/save preservation on upgrade,
+cancelled-upgrade rollback, invalid-image rejection, copied-image integrity,
+reuse of the installed image, uninstall preservation, Start-menu shortcuts and
+per-user Apps registration/cleanup. The copied 2953707520-byte ISO matches the
+source SHA-256. Previews render offscreen; all game checks are hidden and muted.
+The release artifact is build/release/smbd-0.1.0-windows-x64-setup.exe, with its
+checksum and release.json. Its SHA-256 is
+84620DAA31A15F5651CC4A06F5B1ABD47DE0D7CFEA7C2487FB8E3B17967DB56F.
+
+Installer painting polish (2026-11-01)
+
+The header previously enlarged LoadIcon's default 32-pixel image to 56 pixels.
+LoadIconWithScaleDown now selects the original 128-pixel resource and creates
+an icon at the current drawing size, cached until DPI changes. Background wood
+covers the complete client area; the dark eight-pixel outer gutter is removed.
+The timer updates controls only after a state revision or elapsed-second change,
+and repaints only the progress panel. WS_EX_COMPOSITED buffers child painting,
+WS_CLIPCHILDREN prevents parent overdraw, and rounded buttons explicitly draw
+their parent background into their corners. Panel and offscreen child drawing
+preserve the caller's clipping region. The wood uses the full fixed layout
+extent so offscreen DPI previews also cover areas beyond the desktop height.
+
+build/checks/installer-polish-20261101-122728/report.json verifies 56/84/112-pixel
+icons in 96/144/192-DPI offscreen renders, zero idle-timer invalidations, buffered
+painting flags and wood-coloured client edges. Installation to a Unicode path,
+muted game boot and uninstall pass on the final release artifact. Rebuilt with
+three workers. The updated installer SHA-256 is
+D691060EC18A4F9CFEF7E0A48D635D2C5B22A0D1D99124B54845D7AD2DA9BC59.

@@ -66,6 +66,11 @@ MultisampleCopy::MultisampleCopy(ID3D11Device* device,ID3D11DeviceContext* conte
     checked_aa(device->CreatePixelShader(stencil.bytes.data(),stencil.bytes.size(),nullptr,&stencil_),"MSAA stencil transfer shader");
     const auto color=shader_binary(ShaderKind::copy_multisample_color);compilations+=unsigned(color.compiled);
     checked_aa(device->CreatePixelShader(color.bytes.data(),color.bytes.size(),nullptr,&color_),"MSAA colour transfer shader");
+    for(unsigned i=0;i<resample_.size();++i) {
+        const auto shader=shader_binary(static_cast<ShaderKind>(unsigned(ShaderKind::resample_target)+i));
+        compilations+=unsigned(shader.compiled);
+        checked_aa(device->CreatePixelShader(shader.bytes.data(),shader.bytes.size(),nullptr,&resample_[i]),"Surface resampling shader");
+    }
     D3D11_BUFFER_DESC offset{};offset.ByteWidth=16;offset.Usage=D3D11_USAGE_DYNAMIC;
     offset.BindFlags=D3D11_BIND_CONSTANT_BUFFER;offset.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
     checked_aa(device->CreateBuffer(&offset,nullptr,&offset_),"MSAA copy offset");
@@ -98,6 +103,34 @@ void MultisampleCopy::color(ID3D11ShaderResourceView* source,ID3D11RenderTargetV
     context_->OMSetRenderTargets(1,&target,nullptr);context_->OMSetDepthStencilState(no_depth_.Get(),0);
     auto buffer=offset_.Get();context_->PSSetConstantBuffers(0,1,&buffer);context_->PSSetShaderResources(0,1,&source);context_->Draw(3,0);
     ID3D11ShaderResourceView* empty=nullptr;context_->PSSetShaderResources(0,1,&empty);context_->OMSetRenderTargets(0,nullptr,nullptr);
+}
+void MultisampleCopy::resample(ID3D11ShaderResourceView* color,ID3D11ShaderResourceView* depth,ID3D11ShaderResourceView* stencil,
+    ID3D11RenderTargetView* target,ID3D11DepthStencilView* destination,unsigned width,unsigned height,
+    unsigned source_scale,unsigned destination_scale,unsigned source_samples,unsigned destination_samples) {
+    struct Parameters {float x,y;unsigned source,destination;};
+    const float ratio=float(source_scale)/destination_scale;
+    const Parameters parameters{ratio,ratio,source_samples,destination_samples};
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    checked_aa(context_->Map(offset_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped),"Surface resampling parameters");
+    std::memcpy(mapped.pData,&parameters,sizeof(parameters));context_->Unmap(offset_.Get(),0);
+    const D3D11_VIEWPORT viewport{0,0,float(width*destination_scale),float(height*destination_scale),0,1};
+    context_->RSSetViewports(1,&viewport);context_->RSSetState(raster_.Get());
+    context_->OMSetBlendState(nullptr,nullptr,UINT_MAX);context_->IASetInputLayout(nullptr);
+    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context_->VSSetShader(vertex_.Get(),nullptr,0);context_->PSSetShader(resample_[source_samples>1?2:0].Get(),nullptr,0);
+    context_->OMSetRenderTargets(1,&target,destination);context_->OMSetDepthStencilState(depth_.Get(),0);
+    ID3D11ShaderResourceView* sources[]={color,depth,stencil};context_->PSSetShaderResources(0,3,sources);
+    auto buffer=offset_.Get();context_->PSSetConstantBuffers(0,1,&buffer);context_->Draw(3,0);
+    if(stencil) {
+        context_->ClearDepthStencilView(destination,D3D11_CLEAR_STENCIL,1,0);
+        context_->OMSetRenderTargets(0,nullptr,destination);context_->PSSetShader(resample_[source_samples>1?3:1].Get(),nullptr,0);
+        for(unsigned bit=0;bit<8;++bit) {
+            context_->OMSetDepthStencilState(stencil_states_[bit].Get(),1U<<bit);
+            auto mask=stencil_masks_[bit].Get();context_->PSSetConstantBuffers(1,1,&mask);context_->Draw(3,0);
+        }
+    }
+    ID3D11ShaderResourceView* empty[3]{};context_->PSSetShaderResources(0,3,empty);
+    context_->OMSetRenderTargets(0,nullptr,nullptr);
 }
 void MultisampleCopy::grow(ID3D11ShaderResourceView* color,ID3D11ShaderResourceView* depth,ID3D11ShaderResourceView* stencil,
                            ID3D11RenderTargetView* target,ID3D11DepthStencilView* destination,unsigned width,unsigned height) {

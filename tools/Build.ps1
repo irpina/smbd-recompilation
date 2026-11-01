@@ -2,12 +2,16 @@ param(
     [string]$Disc = (Join-Path $PSScriptRoot '..\Super Monkey Ball Deluxe\Super Monkey Ball Deluxe (USA).xiso.iso'),
     [switch]$AllowPartial,
     [ValidateRange(1,3)][int]$Workers = 3,
+    [string]$CpuProfile,
     [ValidateSet('All','Analysis','Game')][string]$Stage = 'All'
 )
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $workflowTimer = [Diagnostics.Stopwatch]::StartNew()
 $succeeded = $false
+if($CpuProfile -eq 'Off') { $CpuProfile='' }
+elseif($CpuProfile -eq 'Generate') { $CpuProfile='GENERATE' }
+elseif($CpuProfile) { $CpuProfile=(Resolve-Path -LiteralPath ([IO.Path]::GetFullPath($CpuProfile,$root))).Path }
 function Invoke-Checked([string]$Program, [string[]]$Arguments) {
     & $Program @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Program failed with exit code $LASTEXITCODE" }
@@ -23,7 +27,7 @@ function Configure-Native([string]$Preset, [string]$Directory, [string[]]$Extra 
     if (Test-Path -LiteralPath $cache) {
         $entries = @{}
         foreach ($line in [IO.File]::ReadLines($cache)) {
-            if ($line -match '^(CMAKE_GENERATOR|CMAKE_C_COMPILER|CMAKE_CXX_COMPILER|CMAKE_LINKER_TYPE|SMBD_BATCH|SMBD_SHADER_BANK|SMBD_BUILD_WORKERS):[^=]+=(.*)$') {
+            if ($line -match '^(CMAKE_GENERATOR|CMAKE_C_COMPILER|CMAKE_CXX_COMPILER|CMAKE_LINKER_TYPE|SMBD_BATCH|SMBD_SHADER_BANK|SMBD_BUILD_WORKERS|SMBD_CPU_PROFILE):[^=]+=(.*)$') {
                 $entries[$Matches[1]] = $Matches[2]
             }
         }
@@ -36,7 +40,7 @@ function Configure-Native([string]$Preset, [string]$Directory, [string[]]$Extra 
         if ((Get-Item -LiteralPath 'CMakePresets.json').LastWriteTimeUtc -gt (Get-Item -LiteralPath $cache).LastWriteTimeUtc) { $needsConfigure = $true }
         if ($Preset -eq 'tools' -and ($entries.SMBD_BATCH -or $entries.SMBD_SHADER_BANK)) { $needsConfigure = $true }
         foreach ($argument in $Extra) {
-            if ($argument -notmatch '^-D(SMBD_BATCH|SMBD_SHADER_BANK|SMBD_BUILD_WORKERS)=(.*)$' -or
+            if ($argument -notmatch '^-D(SMBD_BATCH|SMBD_SHADER_BANK|SMBD_BUILD_WORKERS|SMBD_CPU_PROFILE)=(.*)$' -or
                 ([string]$entries[$Matches[1]]).Replace('\','/') -ne $Matches[2].Replace('\','/')) { $needsConfigure = $true }
         }
     }
@@ -121,8 +125,10 @@ try {
         @{inputs=$fingerprint;output=(Get-FileHash -LiteralPath $shaderBank -Algorithm SHA256).Hash} |
             ConvertTo-Json | Set-Content -LiteralPath $shaderCache -Encoding utf8
     } else { Write-Host 'Reusing verified offline shader bank.' }
-    Configure-Native 'windows' 'build/windows' @(
+    $gameConfiguration = @(
         "-DSMBD_BATCH=$root/build/generated/game.cpp", "-DSMBD_SHADER_BANK=$shaderBank", "-DSMBD_BUILD_WORKERS=$Workers")
+    if($PSBoundParameters.ContainsKey('CpuProfile')) { $gameConfiguration += "-DSMBD_CPU_PROFILE=$CpuProfile" }
+    Configure-Native 'windows' 'build/windows' $gameConfiguration
     if ($Stage -eq 'Game') {
         Invoke-Checked cmake @('--build', '--preset', 'release', '--target', 'smbd', '--parallel', "$Workers")
     } else {

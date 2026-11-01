@@ -3,12 +3,13 @@ Composition performance benchmark, 2026-10-30
 Verified Xbox executable SHA256:
 9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2
 
-The current benchmark is Practice Mode > AIAI > Story World 2 > 3 COMPOSITION.
+The Composition benchmark is Practice Mode > AIAI > Story World 2 > 3 COMPOSITION.
+The default switched to World 4 PRO SKATERS on 2026-10-31; see pro_skaters_benchmark.txt.
 It replaces the rotating Story stage preview used in the October 29 research.
 The target remains 360 fresh scenes/second, or 2.778 ms per frame, at native
 1x resolution in widescreen with VSync off. No computer-use tools are involved.
 
-Run tools/Benchmark.ps1 from PowerShell. The default is three independent runs,
+Run tools/Benchmark.ps1 -Scene Composition from PowerShell. It runs three independent windows,
 each with 120 original game ticks of neutral gameplay warmup followed by 1200
 measured ticks (20 seconds). The normal rule clock remains 60 Hz; the number
 of rendered scenes depends on actual performance. All runs are hidden/muted.
@@ -142,3 +143,80 @@ built/linked with three workers. Final artifacts: lookup/, memory-comparison.jso
 lookup-cpu.json, lookup-gpu.json, lookup-frame/, lookup-frame-replay/ and final-build.log.
 The 360 Hz target remains unmet. No further optimization was started after this
 validation.
+
+Performance continuation, 2026-10-31:
+Artifacts are in build/checks/performance-composition-next/. The hardware remains
+Windows x64, Ryzen 5 5600X / GeForce RTX 5060 Ti. Measurements use native 1x,
+widescreen, VSync off, 360 Hz selected, and original texture filtering with AA off.
+Benchmark.ps1 now pins AA/filter settings explicitly; user settings remain intact.
+The current normal save does not unlock Composition, so the validated save from
+build/checks/performance-composition/storage was copied separately for each run.
+The initial locked-stage attempt was rejected and supplies no timing baseline.
+
+Three fresh baseline windows passed all scene checks. Their median/p99 times
+were 4.7134/6.3814, 4.4886/5.6401 and 4.5902/5.6076 ms. These reflect the newer
+rendering/gameplay build, rather than assuming the October 30 executable is still
+current. Its executable SHA256 is
+2C4DE98BF07C025F9585A20DEE6A6381287463D60F299E941F91178EE24107EC.
+The matching native profile collected 10849 samples over 15 seconds. Renderer
+draw/driver work, repeated shader lookup, and distributed guest CPU work guided
+the retained changes. That profile predates the final compiler optimization.
+
+Retained optimizations:
+- The renderer keeps one exact byte copy of each private shader-constant buffer,
+  uploading only changed contents. Initial uploads, signed zero and NaNs retain
+  their original values; draw order and buffer bindings remain unchanged.
+- The graphics bridge retains the current programmable-shader handle until its
+  entry or uploaded instruction words change. Both scalar and bulk uploads
+  invalidate it. Constants and vertex data continue updating independently.
+- Optional Clang profile-guided CPU compilation uses measured native branch/call
+  counts. Training collected boot, menu and Composition execution; the final
+  executable contains no profiling instrumentation. Game timing and arithmetic
+  code were not changed. No CPU/RAM separation assumptions were added.
+
+The graphics-only three-run median was 4.3476 ms, 5.285% below the fresh baseline.
+The fresh graphics-only control later measured 4.2495/4.9564 ms; the first CPU
+profile-guided probe measured 3.6125/4.1012 ms. Final acceptance uses the separate
+three-run results below, not that single probe or the instrumented training run.
+
+Final three independent 20-second windows:
+  Run 1: frame median/p99 3.694900/4.365900 ms; GPU median/p99 1.022912/1.266240 ms; peak RAM 259.395 MiB.
+  Run 2: frame median/p99 3.661400/4.087300 ms; GPU median/p99 1.018688/1.196448 ms; peak RAM 260.113 MiB.
+  Run 3: frame median/p99 3.692900/4.174900 ms; GPU median/p99 1.024896/1.204000 ms; peak RAM 262.684 MiB.
+The median of run medians fell 19.548%, from 4.5902 to 3.6929 ms. Guest CPU cost
+fell from 2.57..2.65 to 1.93..1.98 ms/scene. Graphics-command cost is now about
+0.65 ms/scene; buffer uploads about 0.38 ms. Buffer maps fell from 2146..2156 to
+1203..1210 per scene. Average draw counts differ by at most about 1.6%, reflecting
+different animation sampling at the higher frame rate; no draws were removed.
+All windows covered ticks 1719..2919, normal mode 51 / ball state 32, AIAI and
+neutral ball position (0, 0.5, 0), with zero dropped records or state transitions.
+Total run times were 49.739..49.791 seconds, including startup, navigation and IO.
+A separate traced capture measured 791.442 ms from process startup to first game
+frame (startup.json); this is not an isolated Composition stage-loading metric.
+The 360 Hz / 2.778 ms target remains unmet. Other main/party scenes and platforms
+have not received new performance qualification from this Composition profile.
+
+Validation: all 20 existing CPU, 15 texture/packet, 16 bump-mapping and 11 image-
+copy cases passed. The fresh baseline frame replayed 654 draws with zero changed
+pixels. A new live final-build frame independently replayed all 686 draws with
+zero changed pixels and zero D3D11 errors. Replay resolves programs independently
+of the graphics bridge's new handle cache. These are consistency checks, not new
+original-Xbox visual references. No new test framework or tests were added.
+All builds and links used three workers; final Build.ps1 -Stage Game passed with
+10628 functions compiled and zero unresolved call sites. Automated runs were
+hidden/muted, and computer-use tools were not activated.
+
+CPU profile support: Build.ps1 -CpuProfile Generate collects raw counts in
+build/windows/cpu-profile; merge them with llvm-profdata merge -j 1 --output
+PROFILE.profdata build/windows/cpu-profile, then build with -CpuProfile PROFILE.profdata.
+Use -CpuProfile Off to return to ordinary compilation. Omitting the option keeps
+the current CMake selection. Profile changes rebuild affected CPU objects, and
+stale control-flow profiles fail compilation. All profile/generated files stay
+local and ignored. The current local selection can be rebuilt with:
+  tools/Build.ps1 -Stage Game -AllowPartial -Workers 3 -CpuProfile build/checks/performance-composition-next/game.profdata
+Its profile SHA256 is
+3E07531F0CB427D6E6D218D6D2B377CFF8AA6832C0300A8E2CC48111665C6CF4.
+The verified final executable SHA256, matching final/benchmark.json, is
+94DE6E7662EA46E2A5D3487A2CB6D5316BE6917218861C27B35CDC6A214DADB4.
+See final-comparison.json, final/benchmark.json, final-*.json, final-frame-replay/,
+profile-final-build.log, profile-final-tool-build.log and verified-build.log.

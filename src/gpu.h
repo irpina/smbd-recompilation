@@ -27,6 +27,7 @@ public:
     ~Gpu();
     void submit(std::uint32_t begin,std::uint32_t end,std::uint32_t callsite=0);
     bool busy();
+    bool time_pending(std::uint32_t address,std::uint32_t issued,std::uint32_t requested);
     void wait();
     void snapshot();
     void invalidate_memory(std::uint32_t address,std::uint32_t size);

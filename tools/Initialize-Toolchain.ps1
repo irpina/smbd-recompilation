@@ -16,9 +16,16 @@ $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.e
 if (!(Test-Path -LiteralPath $vswhere)) { throw 'Install Visual Studio 2026 C++ tools and the Windows SDK.' }
 $visualStudio = & $vswhere -latest -products '*' -version '[18.0,19.0)' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if (!$visualStudio) { throw 'Visual Studio 2026 C++ tools and the Windows SDK are required.' }
-& (Join-Path $visualStudio 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation -NoLogo
+if(([string]$env:VSINSTALLDIR).TrimEnd('\') -ne $visualStudio.TrimEnd('\') -or
+   $env:VSCMD_ARG_TGT_ARCH -ne 'x64' -or $env:VSCMD_ARG_HOST_ARCH -ne 'x64' -or !$env:INCLUDE -or !$env:LIB) {
+    # Reuse a matching environment: repeated batched builds otherwise grow the
+    # dev-shell command line until Windows rejects it as too long.
+    & (Join-Path $visualStudio 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation -NoLogo
+}
 $ninjaDirectory = Join-Path $visualStudio 'Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja'
-$env:Path = "$llvmDirectory;$ninjaDirectory;$env:Path"
+$toolDirectories = @($llvmDirectory,$ninjaDirectory)
+$pathRemainder = @($env:Path -split ';' | Where-Object { $_.TrimEnd('\') -notin $toolDirectories })
+$env:Path = ($toolDirectories + $pathRemainder) -join ';'
 foreach ($name in @('cmake.exe', 'git.exe', 'ninja.exe', 'ml64.exe', 'rc.exe')) {
     if (!(Get-Command $name -CommandType Application -ErrorAction SilentlyContinue)) { throw "Build tool is missing: $name" }
 }

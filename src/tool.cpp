@@ -3,6 +3,7 @@
 #include "pipeline.h"
 #include "diagnostics.h"
 #include "frame_clock.h"
+#include "installation.h"
 #ifdef _WIN32
 #include "performance.h"
 #endif
@@ -74,6 +75,8 @@ std::uint32_t number(std::string_view text) {
 constexpr auto usage =
     "Super Monkey Ball Deluxe native tools (C++23)\n"
     "  smbd-tool prepare ISO OUTPUT_DIRECTORY [--extract-all]\n"
+    "  smbd-tool verify-disc ISO\n"
+    "  smbd-tool install-files ISO OUTPUT_DIRECTORY [--copy-disc]\n"
     "  smbd-tool list ISO [DIRECTORY]\n"
     "  smbd-tool extract ISO DISC_PATH OUTPUT\n"
     "  smbd-tool inspect|verify|check-image XBE\n"
@@ -101,7 +104,7 @@ constexpr auto usage =
     "  smbd-tool check-image-copy [--warp] [--msaa 2|4|8]\n"
     "  smbd-tool check-texture-cache\n"
     "  smbd-tool check-bump-mapping\n"
-    "  smbd-tool check-presentation NEW_OUTPUT_DIRECTORY\n"
+    "  smbd-tool check-presentation NEW_OUTPUT_DIRECTORY [XBE ISO]\n"
     "  smbd-tool replay-frame XBE CAPTURE_DIRECTORY NEW_OUTPUT_DIRECTORY [--through DRAW] [--draw DRAW] [--join-arrays] [--antialiasing 0..6] [--anisotropy 0|1|2|4|8|16]\n"
     "  smbd-tool boot XBE ISO CHECKPOINT_BUDGET OUTPUT.json [FRAME.png]\n"
 #endif
@@ -140,6 +143,12 @@ int tool_main(int argc, char** argv) {
             output=check_timing();
         } else if(command=="check-memory-watch" && (argc==2 || (argc==3 && std::string_view(argv[2])=="--crash"))) {
             output=smbd::check_memory_watch(argc==3);
+        } else if(command=="verify-disc" && argc==3) {
+            output=smbd::verify_install_disc(paths[2]);
+        } else if(command=="install-files" && (argc==4 || (argc==5 && std::string_view(argv[4])=="--copy-disc"))) {
+            output=smbd::install_game_files(paths[2],paths[3],argc==5,[](unsigned percent,std::string_view phase) {
+                std::cout<<"SMBD_PROGRESS "<<percent<<' '<<phase<<'\n'<<std::flush;
+            });
         } else if (command == "prepare" && (argc == 4 || (argc == 5 && std::string_view(argv[4]) == "--extract-all"))) {
             output = smbd::prepare_disc(paths[2], paths[3], argc == 5);
         } else if (command == "verify-analysis" && argc == 4) {
@@ -163,8 +172,8 @@ int tool_main(int argc, char** argv) {
             smbd::Xbe image(paths[2]);if(!image.supported()) throw std::runtime_error("Replay requires the verified executable");
             output=smbd::replay_frame(paths[3],paths[4],image.sha256,through,only,join_arrays,antialiasing,anisotropy);
             if(output.find("\"passed\":false")!=std::string::npos) result=3;
-        } else if(command=="check-presentation" && argc==3) {
-            output=smbd::check_presentation(paths[2]);
+        } else if(command=="check-presentation" && (argc==3 || argc==5)) {
+            output=argc==3?smbd::check_presentation(paths[2]):smbd::check_presentation(paths[2],paths[3],paths[4]);
         } else if(command=="check-bump-mapping" && argc==2) {
             output=smbd::Gpu::check_bump_mapping();
             if(output.find("\"passed\":false")!=std::string::npos) result=3;

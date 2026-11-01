@@ -118,6 +118,7 @@ public:
     void copy_to_main();
     void resize(std::uint32_t width, std::uint32_t height);
     void aspect_ratio(float);
+    void image_quality(unsigned resolution_scale,unsigned antialiasing,unsigned anisotropy);
     void enhancements(unsigned antialiasing,unsigned anisotropy); // AA: off, FXAA low/medium/high, MSAA 2/4/8x. AF: original or 1/2/4/8/16x.
     bool supports_msaa(unsigned samples) const;
     void attach_window(void* native_window);

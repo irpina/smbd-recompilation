@@ -3,6 +3,8 @@
 #include "xbe.h"
 #include "disc.h"
 #include "diagnostics.h"
+#include "xbox.h"
+#include "ui_theme.h"
 #include <SDL3/SDL.h>
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
@@ -73,11 +75,11 @@ float Settings::output_gain(bool focused) const {return muted || (mute_on_focus_
 float Settings::display_aspect() const {return aspect==2?21.0f/9:aspect==1?16.0f/9:4.0f/3;}
 std::filesystem::path Settings::executable_path() const {return root/utf8_path(executable.data());}
 std::filesystem::path Settings::disc_path() const {return root/utf8_path(disc.data());}
-std::string check_presentation(const std::filesystem::path& directory) {
+std::string check_presentation(const std::filesystem::path& directory,const std::filesystem::path& xbe,const std::filesystem::path& disc) {
     if(std::filesystem::exists(directory)) throw std::runtime_error("Use a fresh presentation diagnostic directory");
     std::filesystem::create_directories(directory);
     unsigned checks=0;
-    const auto require=[&](bool condition) {++checks;if(!condition) throw std::runtime_error("Completed-frame presentation check failed");};
+    const auto require=[&](bool condition) {++checks;if(!condition) throw std::runtime_error(std::format("Completed-frame presentation check {} failed",checks));};
     Settings settings;require(settings.refresh_rate==60);
     for(int rate:{0,30,144,360,1000}) {
         settings.refresh_rate=rate;settings.save(directory/"settings.cfg");
@@ -127,7 +129,50 @@ std::string check_presentation(const std::filesystem::path& directory) {
         require(renderer.errors().empty());
         require(SDL_SetWindowSize(window.get(),96,72));SDL_PumpEvents();
     }
-    const auto report=std::format("{{\"format\":\"smbd-presentation-check-v1\",\"passed\":true,\"checks\":{},\"adapter\":{},\"hidden_window\":true,\"audio_opened\":false,\"scales\":[1,4],\"aspect_ratios\":[\"4:3\",\"16:9\",\"21:9\"]}}",checks,json(adapter));
+    unsigned live_changes=0;
+    if(!xbe.empty()) {
+        Xbe image(xbe);if(!image.supported()) throw std::runtime_error("Live presentation checks require the verified game executable");
+        std::vector<std::byte> ram(64*1024*1024);
+        image.load(std::span(ram).subspan(image.base,image.image_size));Memory memory(0,ram);
+        Renderer renderer(640,480,false,true);
+        renderer.attach_window(SDL_GetPointerProperty(SDL_GetWindowProperties(window.get()),SDL_PROP_WINDOW_WIN32_HWND_POINTER,nullptr));
+        Xbox* running=nullptr;std::uint64_t frames=0;
+        const std::array<std::array<unsigned,4>,7> options{{{2,1,16,2},{1,4,2,0},{2,5,4,1},{1,6,8,2},{4,0,1,0},{1,3,0,1},{1,0,0,2}}};
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(30);
+        XboxHost host;host.renderer=&renderer;host.main_address=0x14B90;host.storage=directory/"storage";host.mute_audio=true;
+        host.refresh_rate=[] {return 60U;};host.widescreen=true;
+        host.poll=[&](std::uint64_t) {return frames<(options.size()+1)*24 && std::chrono::steady_clock::now()<deadline;};
+        host.frames=[&] {return frames;};
+        host.flip=[&] {
+            ++frames;
+            if(frames%24==0 && frames/24<=options.size()) {
+                const auto& option=options[frames/24-1];
+                if(option[1]<4 || renderer.supports_msaa(1U<<(option[1]-3))) {
+                    renderer.image_quality(option[0],option[1],option[2]);running->aspect_ratio(option[3]);
+                    renderer.aspect_ratio(option[3]==2?21.0f/9:option[3]==1?16.0f/9:4.0f/3);
+                    const auto stats=renderer.stats();
+                    require(stats.resolution_scale==option[0] && stats.antialiasing==option[1] && stats.anisotropy==option[2]);
+                    require(memory.load<std::uint8_t>(0x6C934C)==(option[3]!=0));
+                    require(memory.load<std::uint32_t>(0x402428)==(option[3]==2?std::bit_cast<std::uint32_t>(21.0f/9):0x3FE38E39U));
+                    const auto layout=std::bit_cast<std::int8_t>(memory.load<std::uint8_t>(0x73F190));
+                    if(!option[3] || (layout>=0 && layout<=3)) {
+                        const auto aspect=option[3] && layout!=3?(option[3]==2?21.0f/9:16.0f/9):4.0f/3;
+                        require(memory.load<std::uint32_t>(0x73F0EC)==std::bit_cast<std::uint32_t>(aspect));
+                        for(unsigned i=0;i<5;++i) require(memory.load<std::uint32_t>(0x73F1D4+i*0x28C)==std::bit_cast<std::uint32_t>(aspect));
+                    }
+                    ++live_changes;
+                }
+            }
+            renderer.publish_frame();
+            require(renderer.display(true));renderer.present(false);
+        };
+        Xbox xbox(image,memory,ram,disc,std::move(host));running=&xbox;
+        const auto result=xbox.run(0);
+        write_text(directory/"live-boot.json",boot_report(image,result)+'\n',false);
+        require(result.boundary=="Native window closed" && frames>options.size()*24 && live_changes>=4);
+        require(renderer.errors().empty());save_png(renderer.readback(),directory/"live-final.png");
+    }
+    const auto report=std::format("{{\"format\":\"smbd-presentation-check-v1\",\"passed\":true,\"checks\":{},\"adapter\":{},\"hidden_window\":true,\"game_booted\":{},\"audio_output_muted\":true,\"live_graphics_changes\":{},\"scales\":[1,4],\"aspect_ratios\":[\"4:3\",\"16:9\",\"21:9\"]}}",checks,json(adapter),!xbe.empty(),live_changes);
     write_text(directory/"report.json",report+'\n',false);return report;
 }
 namespace {
@@ -148,12 +193,9 @@ Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ui_texture(Renderer& renderer,c
 Image wood_grain() {
     Image image{512,256,std::vector<std::byte>(512*256*4)};
     for(unsigned y=0;y<image.height;++y) for(unsigned x=0;x<image.width;++x) {
-        const float curve=y+3*std::sin(x*.013f)+2*std::sin(x*.031f+y*.025f);
-        const float grain=5*std::sin(curve*.65f)+3*std::sin(curve*2.7f)+8*std::sin(curve*.083f);
-        const auto noise=((x*1664525U+y*1013904223U)^(x*y*2654435761U))>>28;
+        const auto color=theme::wood_pixel(x,y);
         auto* pixel=image.rgba.data()+(y*image.width+x)*4;
-        pixel[0]=static_cast<std::byte>(107+grain+noise*.2f);pixel[1]=static_cast<std::byte>(70+grain*.72f+noise*.15f);
-        pixel[2]=static_cast<std::byte>(35+grain*.38f);pixel[3]=std::byte{255};
+        for(unsigned i=0;i<4;++i) pixel[i]=static_cast<std::byte>(color[i]);
     }
     return image;
 }
@@ -362,11 +404,11 @@ void SettingsUi::draw(bool playing,bool recording,double fps,const std::function
             case 3: {
                 ImGui::SeparatorText("DISPLAY");constexpr const char* aspects[]={"Standard (4:3)","Widescreen (16:9)","Ultrawide (21:9)"};
                 label("Aspect ratio");changed|=ImGui::Combo("##Aspect",&settings_.aspect,aspects,3);
-                help("Uses the original game's Xbox display setting for the correct camera and widescreen layout. Applies when you restart the game.");
+                help("Uses the original game's Xbox display setting for the correct camera and widescreen layout. Applies immediately.");
                 changed|=ImGui::Checkbox("V-sync",&settings_.vsync);help("Synchronizes presentation with your display to prevent tearing.");
                 ImGui::SameLine();
                 changed|=ImGui::Checkbox("Fullscreen",&settings_.fullscreen);
-                ImGui::Spacing();ImGui::TextWrapped("Aspect ratio changes apply when you start or restart the game.");break;
+                break;
             }
             case 4: {
                 ImGui::SeparatorText("RESOLUTION");label("Internal resolution");
@@ -375,7 +417,7 @@ void SettingsUi::draw(bool playing,bool recording,double fps,const std::function
                     for(int scale=1;scale<=4;++scale) if(ImGui::Selectable(std::format("{}x ({} x {})",scale,640*scale,480*scale).c_str(),settings_.resolution==scale)) {settings_.resolution=scale;changed=true;}
                     ImGui::EndCombo();
                 }
-                help("Higher resolutions sharpen geometry and use more GPU memory. Applies when you start or restart the game.");
+                help("Higher resolutions sharpen geometry and use more GPU memory. Applies immediately.");
                 ImGui::SeparatorText("IMAGE QUALITY");label("Antialiasing");
                 constexpr const char* quality[]={"Off (original)","FXAA Low","FXAA Medium","FXAA High","MSAA 2x","MSAA 4x","MSAA 8x"};
                 if(ImGui::BeginCombo("##Antialiasing",quality[settings_.antialiasing])) {
@@ -388,14 +430,13 @@ void SettingsUi::draw(bool playing,bool recording,double fps,const std::function
                     }
                     ImGui::EndCombo();
                 }
-                help("MSAA smooths geometry edges while keeping textures sharp. FXAA smooths the whole image and can soften fine detail and in-game text. Higher settings use more GPU power and memory. Applies when you start or restart the game.");
+                help("MSAA smooths geometry edges while keeping textures sharp. FXAA smooths the whole image and can soften fine detail and in-game text. Higher settings use more GPU power and memory. Applies immediately.");
                 constexpr int values[]={0,1,2,4,8,16};
                 constexpr const char* filters[]={"Original (game setting)","Off (1x)","2x","4x","8x","16x"};
                 int filter=0;for(int i=0;i<6;++i) if(settings_.anisotropy==values[i]) filter=i;
                 label("Anisotropic filtering");
                 if(ImGui::Combo("##Anisotropic filtering",&filter,filters,6)) {settings_.anisotropy=values[filter];changed=true;}
-                help("Keeps textures sharper when viewed at an angle. Original preserves the game's filtering settings. Higher values use more GPU power. Applies when you start or restart the game.");
-                ImGui::Spacing();ImGui::TextWrapped("Resolution, aspect ratio and image quality changes apply when you start or restart the game.");break;
+                help("Keeps textures sharper when viewed at an angle. Original preserves the game's filtering settings. Higher values use more GPU power. Applies immediately.");break;
             }
             case 5: {
                 bool controller=binding_controller_;
@@ -406,22 +447,37 @@ void SettingsUi::draw(bool playing,bool recording,double fps,const std::function
                 if(binding_action_>=0) {
                     ImGui::TextColored({1,.83f,.25f,1},"Waiting for input: %s",control_actions[binding_action_].label.data());
                     ImGui::SameLine();if(ImGui::SmallButton("Cancel")) binding_action_=-1;
-                } else ImGui::TextDisabled("Changes apply immediately and are saved automatically.");
+                }
                 if(ImGui::Button("Restore controls")) {settings_.bindings=default_bindings();binding_action_=-1;changed=true;}
-                if(ImGui::BeginTable("Bindings",3,ImGuiTableFlags_ScrollY|ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersInnerH,{0,ImGui::GetContentRegionAvail().y})) {
+                const auto& style=ImGui::GetStyle();
+                ImGui::PushStyleVar(ImGuiStyleVar_CellPadding,ImVec2{style.FramePadding.x,style.CellPadding.y});
+                constexpr auto table_flags=ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersInnerH|ImGuiTableFlags_PadOuterX;
+                const auto columns=[] {
                     ImGui::TableSetupColumn("Action",ImGuiTableColumnFlags_WidthStretch,.9f);
                     ImGui::TableSetupColumn("Binding",ImGuiTableColumnFlags_WidthStretch,1.1f);
-                    ImGui::TableSetupColumn("",ImGuiTableColumnFlags_WidthFixed,64);ImGui::TableSetupScrollFreeze(0,1);ImGui::TableHeadersRow();
-                    for(unsigned i=0;i<control_actions.size();++i) {
-                        ImGui::PushID(int(i));ImGui::TableNextRow();ImGui::TableNextColumn();ImGui::AlignTextToFramePadding();ImGui::TextUnformatted(control_actions[i].label.data());
-                        ImGui::TableNextColumn();auto& binding=settings_.bindings[i];auto& code=binding_controller_?binding.gamepad:binding.keyboard;
-                        const auto name=binding_action_==int(i)?"Press input...":binding_name(code,binding_controller_);
-                        if(ImGui::Button(name.c_str(),{-1,0})) rebind(i,binding_controller_);
-                        ImGui::TableNextColumn();if(ImGui::Button("Clear",{-1,0})) {code=0;binding_action_=-1;changed=true;}
-                        ImGui::PopID();
-                    }
-                    ImGui::EndTable();
+                    ImGui::TableSetupColumn("",ImGuiTableColumnFlags_WidthFixed,64);
+                };
+                // Only the rows scroll; reserve the same scrollbar width in the fixed header.
+                ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2{style.ItemSpacing.x,0});
+                if(ImGui::BeginTable("Binding headers",3,table_flags,{ImGui::GetContentRegionAvail().x-style.ScrollbarSize,0})) {
+                    columns();ImGui::TableHeadersRow();ImGui::EndTable();
                 }
+                ImGui::PopStyleVar();
+                if(ImGui::BeginChild("Binding rows",{0,0},ImGuiChildFlags_None,ImGuiWindowFlags_AlwaysVerticalScrollbar)) {
+                    if(ImGui::BeginTable("Bindings",3,table_flags)) {
+                        columns();
+                        for(unsigned i=0;i<control_actions.size();++i) {
+                            ImGui::PushID(int(i));ImGui::TableNextRow();ImGui::TableNextColumn();ImGui::AlignTextToFramePadding();ImGui::TextUnformatted(control_actions[i].label.data());
+                            ImGui::TableNextColumn();auto& binding=settings_.bindings[i];auto& code=binding_controller_?binding.gamepad:binding.keyboard;
+                            const auto name=binding_action_==int(i)?"Press input...":binding_name(code,binding_controller_);
+                            if(ImGui::Button(name.c_str(),{-1,0})) rebind(i,binding_controller_);
+                            ImGui::TableNextColumn();if(ImGui::Button("Clear",{-1,0})) {code=0;binding_action_=-1;changed=true;}
+                            ImGui::PopID();
+                        }
+                        ImGui::EndTable();
+                    }
+                }
+                ImGui::EndChild();ImGui::PopStyleVar();
                 break;
             }
             case 6:

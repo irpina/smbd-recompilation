@@ -38,11 +38,15 @@ public:
     void grow(ID3D11ShaderResourceView* color,ID3D11ShaderResourceView* depth,ID3D11ShaderResourceView* stencil,
               ID3D11RenderTargetView*,ID3D11DepthStencilView*,unsigned width,unsigned height);
     void color(ID3D11ShaderResourceView*,ID3D11RenderTargetView*,unsigned sx,unsigned sy,unsigned dx,unsigned dy,unsigned width,unsigned height);
+    void resample(ID3D11ShaderResourceView* color,ID3D11ShaderResourceView* depth,ID3D11ShaderResourceView* stencil,
+                  ID3D11RenderTargetView*,ID3D11DepthStencilView*,unsigned width,unsigned height,
+                  unsigned source_scale,unsigned destination_scale,unsigned source_samples,unsigned destination_samples);
 private:
     template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
     ID3D11DeviceContext* context_;
     Ptr<ID3D11VertexShader> vertex_;
     Ptr<ID3D11PixelShader> pixel_,stencil_,color_;
+    std::array<Ptr<ID3D11PixelShader>,4> resample_;
     Ptr<ID3D11Buffer> offset_;
     Ptr<ID3D11DepthStencilState> no_depth_;
     Ptr<ID3D11RasterizerState> raster_;

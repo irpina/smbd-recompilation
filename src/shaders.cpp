@@ -161,10 +161,30 @@ const char* shader_profile(ShaderKind kind) {
     if(kind==ShaderKind::clear_pixel || kind==ShaderKind::display_pixel || kind==ShaderKind::gui_pixel ||
        (kind>=ShaderKind::combiner0 && kind<=ShaderKind::combiner8) ||
        (kind>=ShaderKind::color && kind<=ShaderKind::modulate3d) ||
-       (kind>=ShaderKind::fxaa && kind<=ShaderKind::copy_multisample_color)) return "ps_5_0";
+       (kind>=ShaderKind::fxaa && kind<=ShaderKind::resample_multisample_stencil)) return "ps_5_0";
     return "vs_5_0";
 }
 std::string shader_source(ShaderKind kind) {
+    if(kind>=ShaderKind::resample_target && kind<=ShaderKind::resample_multisample_stencil) {
+        const bool multisample=kind>=ShaderKind::resample_multisample;
+        const bool stencil=kind==ShaderKind::resample_stencil || kind==ShaderKind::resample_multisample_stencil;
+        std::string source="cbuffer C:register(b0){float2 ratio;uint source_samples;uint destination_samples;}\n"
+            "cbuffer Mask:register(b1){uint bit_mask;uint3 padding;}\n";
+        if(stencil) source+=multisample?"Texture2DMS<uint2> image:register(t2);\n":"Texture2D<uint2> image:register(t2);\n";
+        else source+=multisample?"Texture2DMS<float4> colour:register(t0);Texture2DMS<float> depth:register(t1);\n":
+            "Texture2D<float4> colour:register(t0);Texture2D<float> depth:register(t1);\n";
+        if(!stencil) source+="struct Output {float4 colour:SV_Target;float depth:SV_Depth;};\n";
+        source+=stencil?"void main(":"Output main(";
+        source+="float4 position:SV_Position,uint sample:SV_SampleIndex){int2 p=int2(position.xy*ratio);";
+        const auto index=multisample?"p,min(sample,source_samples-1)":"int3(p,0)";
+        if(stencil) source+="if((image.Load("+std::string(index)+").y&bit_mask)==0) discard;";
+        else {
+            source+="Output o;o.colour=colour.Load("+std::string(index)+");o.depth=depth.Load("+index+");";
+            if(multisample) source+="if(destination_samples==1){o.colour=0;for(uint i=0;i<source_samples;++i)o.colour+=colour.Load(p,i)/source_samples;}";
+            source+="return o;";
+        }
+        return source+"}";
+    }
     if(kind>=ShaderKind::color && kind<=ShaderKind::modulate3d) {
         // Exact reductions of pass-through and single-stage multiplication.
         // Keep the shared bindings/alpha comparison, with no register decoding.

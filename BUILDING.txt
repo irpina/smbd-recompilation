@@ -4,6 +4,29 @@ Windows prerequisites: LLVM 22.1+ (clang-cl, LLD), Ninja, Visual Studio 2026 C++
 tools and Windows SDK, CMake 4.2+, Git, PowerShell and JDK 21+.
 No Python is used. Controller-driven play through the first level is verified.
 
+Windows release installer:
+
+  .\tools\Package.ps1
+
+This builds and packages the current release with three workers. Use -Workers
+1 or 2 to reduce build load, or -SkipBuild to package already-built game/tool
+binaries. The installer is written to build/release with a SHA-256 checksum
+and release.json. Only the Runtime component is packaged: game, diagnostics,
+application-local C++ runtime libraries, branding, target registry and notices.
+Original game files, saves, preferences, profiles and generated source are excluded.
+The installer itself uses the static C++ runtime and Windows' cabinet services;
+no additional installer builder is needed. Cabinet payloads are reused only
+when their complete file manifest and archive checksum still match.
+
+The themed per-user installer verifies a supported US Xbox XISO, optionally
+copies it into the installation folder, prepares the executable/preferences,
+and creates Start-menu and optional desktop shortcuts. Its worker reports real
+stage/byte progress while the window remains responsive. Upgrades preserve
+preferences and saves. Uninstall removes recorded application files and copied
+game files while keeping saved games, preferences and the original source ISO.
+Native --preview/--preview-progress BMP captures and --silent-install with
+--no-register support isolated validation without operating the desktop.
+
 Run from the source folder:
 
   .\tools\Build.ps1 -AllowPartial

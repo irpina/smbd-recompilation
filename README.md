@@ -8,7 +8,7 @@
 
 An unofficial native version of the original Xbox game for Windows, built around accurate gameplay, the original presentation, and higher refresh rates.
 
-**This is a playable development build, not a finished port.** Bugs, slowdowns, and stops in untested game modes are still possible. Linux and macOS are planned targets; the current game build requires Windows x64.
+**0.1.0 is the first public development release.** Bugs, slowdowns, and stops in untested game modes are still possible. Linux and macOS are planned targets; the current game build requires Windows x64.
 
 This fan project is independent of SEGA. You must provide your own US Xbox game disc image. Original game files are not distributed here.
 
@@ -31,8 +31,8 @@ OpenAI Codex has assisted with development and research. Changes are checked usi
 - Practice Mode, including AIAI on World 2, stage 3 COMPOSITION.
 - Keyboard and gamepad input, pause/resume, and native audio playback.
 - Creating and reopening game saves.
-- Saved display, refresh-rate, audio, and game-file settings.
-- Original 4:3, widescreen 16:9, and ultrawide 21:9 options; 1×–4× internal resolution.
+- Saved display, refresh-rate, audio, game-file, and keyboard/controller bindings.
+- Original 4:3, widescreen 16:9, and ultrawide 21:9 options; 1×–4× internal resolution, FXAA/MSAA, and anisotropic filtering. These options apply while playing.
 - Fresh scene rendering above 60 Hz, with the original rule and input timing preserved.
 - Frame captures, offline rendering replay, and CPU/GPU performance reports.
 
@@ -50,7 +50,16 @@ OpenAI Codex has assisted with development and research. Changes are checked usi
 
 You need a Direct3D 11-capable graphics card and an XISO image of the **US Xbox release of Super Monkey Ball Deluxe**. A full raw-disc dump must first be converted to XISO. The executable is checked against [the supported-target registry](knowledge/supported_target.json).
 
-**Downloadable builds are coming soon.** For now, build from source using the instructions below. There is no automatic installer yet.
+**[Download the 0.1.0 Windows installer](https://github.com/timftw21/smbd-recompilation/releases/download/v0.1.0/smbd-0.1.0-windows-x64-setup.exe)** · [Release notes and SHA-256 checksum](https://github.com/timftw21/smbd-recompilation/releases/tag/v0.1.0)
+
+1. Run the installer and select your US Xbox XISO image.
+2. Choose an installation folder. You can keep a copy of the image with the game and create a desktop shortcut.
+3. Choose **Install**. The progress panel shows verification, extraction, and copying as they happen.
+4. Choose **Play game**, or launch it later from the Start menu or desktop shortcut.
+
+The installer supplies the compiled game and runtime libraries. It checks your image and prepares the game files automatically. If you leave the image in its original location, keep it available while playing. The default installation is in `%LOCALAPPDATA%\Programs\Super Monkey Ball Deluxe`.
+
+### Building from source
 
 Install these build prerequisites:
 
@@ -68,7 +77,7 @@ cd smbd-recompilation
 .\Play.cmd
 ```
 
-Replace the example disc path with your own. The first build downloads pinned dependencies, prepares the disc, runs offline analysis, and compiles the game. Python is not required. `-AllowPartial` is currently necessary for the prototype: unimplemented paths stop with an error instead of silently pretending to work.
+Replace the example disc path with your own. The first build downloads pinned dependencies, prepares the disc, runs offline analysis, and compiles the game. Python is not required. Unsupported paths stop with an error.
 
 In **Game Files**, select your disc image and the prepared `data/local/default.xbe`, validate the files, then choose **Play game**. Keep the source folder, build output, and disc image available. See [BUILDING.txt](BUILDING.txt) for the build stages and developer commands.
 
@@ -83,7 +92,9 @@ Press **F1** or **Esc**, or the gamepad **Back** button, to open settings. Prefe
 - **Game Files:** Select and validate the XISO and executable.
 - **General:** Choose a refresh limit or Unlimited, and toggle the frame-rate display. V-sync can impose an additional limit.
 - **Audio:** Adjust master volume, mute, or mute when the window loses focus.
-- **Graphics:** Set aspect ratio, fullscreen, V-sync, and 1×–4× internal resolution. Restart the game to apply resolution or aspect changes.
+- **Graphics:** Set aspect ratio, fullscreen, and V-sync.
+- **Enhancements:** Choose 1×–4× internal resolution, FXAA or supported MSAA levels, and anisotropic filtering up to 16×. Resolution, antialiasing, filtering, and aspect ratio apply immediately.
+- **Controls:** Rebind keyboard keys, controller buttons, and stick directions, clear bindings, or restore the defaults.
 - **Diagnostics:** Capture a frame or record a slowdown.
 
 Higher rendering rates produce new scene updates. Game rules and input retain their original 60 Hz clock; audio keeps its own sample clock and movies retain their source cadence.
@@ -103,13 +114,15 @@ Connected gamepads use the left stick for stage tilt, **A** to confirm, **B** to
 | Capture a frame | F8 |
 | Start / save performance recording | F9 |
 
-Movement keys apply full tilt. Short taps allow finer control. Game input is held neutral while settings are open.
+Change game bindings in **Controls**. Movement keys apply full tilt. Short taps allow finer control. Game input is held neutral while settings are open.
 
 ## Saves and updates
 
-Game saves and the local storage identity are in `data/user`. **Back up that entire folder, including `storage.key`.** Preferences are in `data/local/settings.cfg`.
+Game saves and the local storage identity are in `data/user` inside your installation or source folder. **Back up that entire folder, including `storage.key`.** Preferences and control bindings are in `data/local/settings.cfg`.
 
-Close the game before updating the source. Preserve your `data` and `build` folders, rebuild, then launch `Play.cmd` again. When moving the project or disc image, update the paths in Game Files.
+For installed builds, close the game and run the newer installer using the same installation folder. Updates preserve saves and preferences. Uninstall through Windows **Installed apps**; saved games, preferences, and your original source image are kept. An image copied into the installation folder is removed during uninstall.
+
+For source builds, close the game, update the source, preserve your `data` and `build` folders, rebuild, then launch `Play.cmd` again. When moving the project or disc image, update the paths in Game Files.
 
 ## Development and credits
 

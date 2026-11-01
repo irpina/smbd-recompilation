@@ -298,6 +298,9 @@ struct Renderer::Impl {
     std::array<ComPtr<ID3D11InputLayout>,7> fixed_layouts;
     ComPtr<ID3D11InputLayout> layout;
     ComPtr<ID3D11Buffer> vertices, index_buffer, factor_buffer, program_constants;
+    Constants last_factors{};
+    ProgramUniforms last_program_uniforms{};
+    bool factors_uploaded=false,program_uniforms_uploaded=false;
     UINT vertex_cursor=0,index_cursor=0;
     ComPtr<ID3D11Buffer> launch_constants, launch_inputs, launch_readback;
     ComPtr<ID3D11UnorderedAccessView> launch_output;
@@ -568,12 +571,13 @@ struct Renderer::Impl {
     void draw(const RenderState&, Bytes, std::size_t, std::span<const std::uint32_t>,
               const Program* = nullptr, const ProgramUniforms* = nullptr,const StreamDraw* = nullptr);
     FrameTarget make_target(std::uint32_t w,std::uint32_t h,SurfaceColor color_format=SurfaceColor::rgba8,
-                           SurfaceDepth depth_format=SurfaceDepth::z24s8,const FrameTarget* shared=nullptr,unsigned sample_count=0) {
+                           SurfaceDepth depth_format=SurfaceDepth::z24s8,const FrameTarget* shared=nullptr,unsigned sample_count=0,unsigned scale=0) {
         extent(w,h);
         FrameTarget output{w,h,color_format,depth_format};
         const auto native_color=color_format==SurfaceColor::rgb565?DXGI_FORMAT_B5G6R5_UNORM:DXGI_FORMAT_R8G8B8A8_UNORM;
         D3D11_TEXTURE2D_DESC texture{};
-        texture.Width=w*resolution_scale; texture.Height=h*resolution_scale; texture.MipLevels=texture.ArraySize=1;
+        if(!scale) scale=resolution_scale;
+        texture.Width=w*scale; texture.Height=h*scale; texture.MipLevels=texture.ArraySize=1;
         extent(texture.Width,texture.Height);
         texture.Format=native_color; texture.SampleDesc.Count=sample_count?sample_count:samples;
         texture.BindFlags=D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
@@ -594,13 +598,15 @@ struct Renderer::Impl {
             checked(device->CreateShaderResourceView(output.resolved.Get(),nullptr,&output.texture_view),"Target texture view");
         }
         texture.Format=depth_format==SurfaceDepth::z16?DXGI_FORMAT_R16_TYPELESS:DXGI_FORMAT_R24G8_TYPELESS;
-        texture.BindFlags=D3D11_BIND_DEPTH_STENCIL|(texture.SampleDesc.Count>1?D3D11_BIND_SHADER_RESOURCE:0);
+        texture.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;
         checked(device->CreateTexture2D(&texture,nullptr,&output.depth), "Depth target");
         D3D11_DEPTH_STENCIL_VIEW_DESC depth_view{};depth_view.Format=depth_format==SurfaceDepth::z16?DXGI_FORMAT_D16_UNORM:DXGI_FORMAT_D24_UNORM_S8_UINT;
         depth_view.ViewDimension=texture.SampleDesc.Count>1?D3D11_DSV_DIMENSION_TEXTURE2DMS:D3D11_DSV_DIMENSION_TEXTURE2D;
         checked(device->CreateDepthStencilView(output.depth.Get(),&depth_view,&output.depth_view), "Depth view");
-        if(texture.SampleDesc.Count>1) {
-            D3D11_SHADER_RESOURCE_VIEW_DESC view{};view.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2DMS;
+        {
+            D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+            view.ViewDimension=texture.SampleDesc.Count>1?D3D11_SRV_DIMENSION_TEXTURE2DMS:D3D11_SRV_DIMENSION_TEXTURE2D;
+            if(texture.SampleDesc.Count==1) view.Texture2D.MipLevels=1;
             view.Format=depth_format==SurfaceDepth::z16?DXGI_FORMAT_R16_UNORM:DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
             checked(device->CreateShaderResourceView(output.depth.Get(),&view,&output.depth_texture),"Multisample depth view");
             if(depth_format!=SurfaceDepth::z16) {view.Format=DXGI_FORMAT_X24_TYPELESS_G8_UINT;
@@ -666,29 +672,69 @@ void Renderer::aspect_ratio(float aspect) {
 }
 bool Renderer::supports_msaa(unsigned samples) const {return samples>=2 && samples<=8 && std::has_single_bit(samples) && (impl_->msaa_supported&samples)!=0;}
 void Renderer::enhancements(unsigned quality,unsigned anisotropy) {
+    image_quality(impl_->resolution_scale,quality,anisotropy);
+}
+void Renderer::image_quality(unsigned scale,unsigned quality,unsigned anisotropy) {
     auto& r=*impl_;
-    if(r.recording || r.targets.size()!=1 || r.texture_bytes || quality>6 || anisotropy>16 || (anisotropy && !std::has_single_bit(anisotropy)))
-        throw std::runtime_error("Change image quality before starting the game.");
+    if(r.recording) throw std::runtime_error("Change image quality between completed frames.");
+    if(scale<1 || scale>4 || quality>6 || anisotropy>16 || (anisotropy && !std::has_single_bit(anisotropy)))
+        throw std::runtime_error("Invalid internal resolution or image quality.");
+    if(scale==r.resolution_scale && quality==r.antialiasing_quality && anisotropy==r.anisotropy) return;
     const unsigned samples=quality>=4?1U<<(quality-3):1U;
     if(samples>1 && !supports_msaa(samples)) throw std::runtime_error("This MSAA level is unavailable on your graphics device.");
+    const bool rebuild=scale!=r.resolution_scale || samples!=r.samples;
+    const bool replace_aa=rebuild || quality!=r.antialiasing_quality;
+    const auto& main=r.targets.at(0);
+    const auto pixels=std::size_t(main.width)*main.height*scale*scale;
+    std::size_t bytes=rebuild?0:r.target_bytes;
+    std::map<ID3D11Texture2D*,std::uint32_t> colors;
+    if(rebuild) for(const auto& [id,image]:r.targets) {
+        const bool shared=!colors.emplace(image.color.Get(),id).second;
+        bytes+=std::size_t(image.width)*image.height*scale*scale*
+            ((shared?0:r.color_size(image.color_format)*(samples+(samples>1?1:0)))+r.depth_size(image.depth_format)*samples);
+    }
+    const auto presentation=r.window?pixels*4:0;
+    const auto aa_bytes=quality && quality<=3?pixels*4:0;
+    if(bytes+presentation+aa_bytes>r.target_limit)
+        throw std::runtime_error("Reduce internal resolution or MSAA to fit the graphics memory budget.");
     std::unique_ptr<FrameAntialiasing> aa;
     std::unique_ptr<MultisampleCopy> copy;
-    const auto& main=r.targets.at(0);
-    if(quality && quality<=3) aa=std::make_unique<FrameAntialiasing>(r.device.Get(),r.context.Get(),main.width*r.resolution_scale,main.height*r.resolution_scale,quality,r.stats.shader_compilations);
-    if(samples>1) copy=std::make_unique<MultisampleCopy>(r.device.Get(),r.context.Get(),r.stats.shader_compilations);
-    if(samples!=r.samples) {
-        const auto previous=r.samples;r.samples=samples;
+    if(replace_aa && aa_bytes) aa=std::make_unique<FrameAntialiasing>(r.device.Get(),r.context.Get(),main.width*scale,main.height*scale,quality,r.stats.shader_compilations);
+    if(rebuild && !r.multisample_copy) copy=std::make_unique<MultisampleCopy>(r.device.Get(),r.context.Get(),r.stats.shader_compilations);
+    std::map<std::uint32_t,Impl::FrameTarget> targets;
+    ComPtr<ID3D11Texture2D> published;
+    ComPtr<ID3D11ShaderResourceView> published_view;
+    if(rebuild) {
+        for(const auto& [id,image]:r.targets) {
+            const auto owner=colors.at(image.color.Get());
+            targets.emplace(id,r.make_target(image.width,image.height,image.color_format,image.depth_format,
+                owner==id?nullptr:&targets.at(owner),samples,scale));
+        }
+        if(r.window) {
+            D3D11_TEXTURE2D_DESC description{};targets.at(0).resolved->GetDesc(&description);
+            description.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+            checked(r.device->CreateTexture2D(&description,nullptr,&published),"Resized presentation image");
+            checked(r.device->CreateShaderResourceView(published.Get(),nullptr,&published_view),"Resized presentation view");
+        }
+        r.unbind_textures();r.context->OMSetRenderTargets(0,nullptr,nullptr);
+        auto& transfer=copy?*copy:*r.multisample_copy;
         try {
-            const auto bytes=r.target_size(main.width,main.height);
-            if(bytes+r.published_bytes>r.target_limit) throw std::runtime_error("Reduce internal resolution or MSAA to fit the graphics memory budget.");
-            auto output=r.make_target(main.width,main.height);
-            r.unbind_textures();r.context->OMSetRenderTargets(0,nullptr,nullptr);
-            r.targets.at(0)=std::move(output);r.target_bytes=bytes;r.select_target(0);r.ended=false;
-        } catch(...) {r.samples=previous;throw;}
+            for(const auto& [id,image]:r.targets) {
+                auto& output=targets.at(id);
+                transfer.resample(r.samples>1?image.multisample_view.Get():image.texture_view.Get(),image.depth_texture.Get(),image.stencil_texture.Get(),
+                    output.color_view.Get(),output.depth_view.Get(),image.width,image.height,r.resolution_scale,scale,r.samples,samples);
+                *output.dirty=samples>1;
+            }
+        } catch(...) {r.select_target(r.current_target);throw;}
+        r.targets=std::move(targets);r.target_bytes=bytes;r.resolution_scale=scale;r.samples=samples;
+        for(const auto& [id,image]:r.targets) if(id) r.textures[id]=image.texture_view;
+        if(copy) r.multisample_copy=std::move(copy);
+        r.published=std::move(published);r.published_view=std::move(published_view);r.published_bytes=presentation;r.published_ready=false;
+        r.select_target(r.current_target);
     }
-    r.antialiasing=std::move(aa);r.multisample_copy=std::move(copy);r.antialiasing_quality=quality;r.anisotropy=anisotropy;
+    if(replace_aa) r.antialiasing=std::move(aa);
+    r.antialiasing_quality=quality;r.anisotropy=anisotropy;
     r.pipelines.clear();
-    if(r.window) r.prepare_presentation();
 }
 std::uint32_t Renderer::create_target(std::uint32_t width,std::uint32_t height,SurfaceColor color,SurfaceDepth depth,std::uint32_t shared_color,bool reuse_slot) {
     auto& r=*impl_;extent(width,height);
@@ -1425,12 +1471,16 @@ void Renderer::Impl::draw(const RenderState& state,Bytes vertex_bytes,std::size_
     default: throw std::runtime_error("Unsupported NV097 primitive: " + hex32(state.primitive));
     }
     if (indices.size() > Impl::max_indices) throw std::runtime_error("Converted indices exceed buffer limit");
-    const auto upload = [&](ID3D11Buffer* buffer, const void* data, std::size_t size) {
+    const auto upload = [&]<class T>(ID3D11Buffer* buffer,const T& data,T& previous,bool& uploaded) {
+        // These private buffers retain their contents across draws and frames.
+        // Compare bytes so NaNs and signed zero keep their exact shader values.
+        if(uploaded && std::memcmp(&previous,&data,sizeof(T))==0) return;
         PerfScope scope(r.profile,PerfPhase::buffer_upload);
-        ++r.stats.buffer_maps;r.stats.total_vertex_bytes+=size;
+        ++r.stats.buffer_maps;r.stats.total_vertex_bytes+=sizeof(T);
         D3D11_MAPPED_SUBRESOURCE mapped{};
         checked(r.context->Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped), "Buffer map");
-        std::memcpy(mapped.pData, data, size); r.context->Unmap(buffer, 0);
+        std::memcpy(mapped.pData,&data,sizeof(T)); r.context->Unmap(buffer, 0);
+        std::memcpy(&previous,&data,sizeof(T));uploaded=true;
     };
     Constants constants{};
     for (unsigned i = 0; i < 8; ++i) {
@@ -1521,7 +1571,7 @@ void Renderer::Impl::draw(const RenderState& state,Bytes vertex_bytes,std::size_
         std::memcpy(destination,vertex_bytes.data(),vertex_bytes.size());r.context->Unmap(r.vertices.Get(),0);
         r.stats.vertex_bytes+=vertex_bytes.size();
     }
-    upload(r.factor_buffer.Get(), &constants, sizeof(constants));
+    upload(r.factor_buffer.Get(),constants,r.last_factors,r.factors_uploaded);
     if(uniforms) {
         auto values=*uniforms;
         if(program->fixed) {
@@ -1529,7 +1579,7 @@ void Renderer::Impl::draw(const RenderState& state,Bytes vertex_bytes,std::size_
             values.fixed_flags={std::uint32_t(fixed.normalize),std::uint32_t(fixed.fog),fixed.fog_source,0};values.fixed_texgen=fixed.texgen;
             for(unsigned i=0;i<4;++i) values.fixed_matrices[i]=fixed.texture_matrix[i];
         }
-        upload(r.program_constants.Get(),&values,sizeof(values));
+        upload(r.program_constants.Get(),values,r.last_program_uniforms,r.program_uniforms_uploaded);
     }
     const UINT stride = static_cast<UINT>(program?sizeof(ProgramVertex):sizeof(Vertex));
     auto vertex_buffer = r.vertices.Get(); auto constant_buffer = r.factor_buffer.Get();
@@ -1724,6 +1774,51 @@ std::string check_image_copy(bool warp,bool debug,unsigned antialiasing) {
     bool rejected=false;
     try {renderer.copy_region(destination,source,UINT32_MAX,0,0,0,1,1);} catch(const std::runtime_error&) {rejected=true;}
     cases.emplace_back("invalid rectangle rejected",rejected);
+    const std::array<std::byte,4> texel{std::byte{32},std::byte{64},std::byte{96},std::byte{255}};
+    const auto ordinary=renderer.upload({1,1,TextureFormat::argb8_linear,texel});
+    // Exercise live changes with existing shared colour, D24S8, D16 and RGB565 resources.
+    for(const auto options:std::array<std::array<unsigned,3>,8>{{{2,4,2},{3,5,4},{1,6,8},{4,0,16},{1,1,0},{1,2,1},{2,3,4},{1,0,0}}}) {
+        if(options[1]>=4 && !renderer.supports_msaa(1U<<(options[1]-3))) continue;
+        const auto scale=renderer.stats().resolution_scale;
+        renderer.set_target(destination);const auto before=renderer.readback();
+        const auto depth=renderer.read_depth(destination),alias_before=renderer.read_depth(alias);
+        renderer.image_quality(options[0],options[1],options[2]);
+        renderer.set_target(destination);const auto after=renderer.readback();
+        bool retained=after.width==10*options[0] && after.height==9*options[0];
+        for(unsigned y=0;y<after.height;++y) for(unsigned x=0;x<after.width;++x) {
+            const auto sx=(2*x+1)*scale/(2*options[0]),sy=(2*y+1)*scale/(2*options[0]);
+            retained&=std::memcmp(after.rgba.data()+(std::size_t(y)*after.width+x)*4,before.rgba.data()+(std::size_t(sy)*before.width+sx)*4,4)==0;
+        }
+        renderer.set_target(alias);retained&=renderer.readback().rgba==after.rgba;
+        const auto retained_depth=[&](std::uint32_t id,const std::vector<std::byte>& before,unsigned size) {
+            const auto actual=renderer.read_depth(id);
+            for(unsigned y=0;y<9*options[0];++y) for(unsigned x=0;x<10*options[0];++x) {
+                const auto sx=(2*x+1)*scale/(2*options[0]),sy=(2*y+1)*scale/(2*options[0]);
+                std::uint32_t a=0,b=0;
+                std::memcpy(&a,actual.data()+(std::size_t(y)*10*options[0]+x)*size,size);
+                std::memcpy(&b,before.data()+(std::size_t(sy)*10*scale+sx)*size,size);
+                if(size==4 && (a>>24)!=(b>>24)) return false;
+                const auto mask=size==4?0xFFFFFFU:0xFFFFU;
+                if(std::abs(std::int64_t(a&mask)-std::int64_t(b&mask))>1) return false;
+            }
+            return true;
+        };
+        retained&=retained_depth(destination,depth,4) && retained_depth(alias,alias_before,2);
+        renderer.set_target(rgb_source);const auto rgb=renderer.readback();
+        for(std::size_t i=0;i<rgb.rgba.size();i+=4) retained&=std::memcmp(rgb.rgba.data()+i,green.rgba.data(),4)==0;
+        const auto stats=renderer.stats();
+        retained&=stats.resolution_scale==options[0] && stats.antialiasing==options[1] && stats.anisotropy==options[2];
+        cases.emplace_back(std::format("live {}x AA {} AF {} retains shared colour/depth/stencil and RGB565",options[0],options[1],options[2]),retained);
+    }
+    renderer.release_texture(ordinary);
+    const auto large=renderer.create_target(1536,1536);
+    const auto before_rejection=renderer.stats();rejected=false;
+    try {renderer.image_quality(4,6,16);} catch(const std::runtime_error&) {rejected=true;}
+    const auto after_rejection=renderer.stats();
+    cases.emplace_back("rejected live change preserves active settings and resources",rejected &&
+        before_rejection.resolution_scale==after_rejection.resolution_scale && before_rejection.antialiasing==after_rejection.antialiasing &&
+        before_rejection.anisotropy==after_rejection.anisotropy && before_rejection.target_bytes==after_rejection.target_bytes);
+    renderer.release_target(large);
     const auto errors=renderer.errors();
     cases.emplace_back("D3D11 validation clean",errors.empty());
     const auto passed=std::ranges::all_of(cases,[](const auto& test){return test.second;});

@@ -13,8 +13,8 @@ Movement keys apply full tilt, so use short taps for finer control.
 Controller: left stick tilts the stage; A confirms, B goes back, Start pauses.
 F1/Esc or the controller Back button opens settings. Keyboard and controller
 navigation work in the settings menu; game inputs are held neutral while it is open.
-Settings save automatically to data/local/settings.cfg. Restart game applies
-resolution and aspect changes. Audio, V-sync and fullscreen apply immediately.
+Settings save automatically to data/local/settings.cfg. Resolution, aspect ratio,
+antialiasing, anisotropic filtering, audio, V-sync and fullscreen apply immediately.
 General > Refresh rate changes the rendering limit immediately. It offers
 Unlimited, common rates and rates reported by the current display, and saves
 your selection. V-sync can further limit presentation to the display rate.

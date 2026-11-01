@@ -12,7 +12,7 @@ union SDL_Event;
 struct ID3D11ShaderResourceView;
 namespace smbd {
 class Renderer;
-std::string check_presentation(const std::filesystem::path&);
+std::string check_presentation(const std::filesystem::path&,const std::filesystem::path& xbe={},const std::filesystem::path& disc={});
 struct Settings {
     std::array<char,2048> executable{},disc{};
     bool show_fps=false,muted=false,mute_on_focus_loss=true,vsync=false,fullscreen=false;

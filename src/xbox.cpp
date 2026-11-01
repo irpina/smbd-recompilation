@@ -258,13 +258,15 @@ struct Xbox::State {
             memory.store<std::uint32_t>(0x482FC8,std::bit_cast<std::uint32_t>((width+1.0f/16)/8));
             memory.store<std::uint32_t>(0x482FCC,std::bit_cast<std::uint32_t>((480.0f+1.0f/16)/8));
         }
-        if(this->host.ultrawide) {
+        {
             // Shared original camera aspect and horizontal canvas width. Their
             // only indexed readers configure cameras/culling and the UI canvas.
             if(memory.load<std::uint32_t>(0x402428)!=0x3FE38E39U || memory.load<std::uint32_t>(0x40242C)!=0x44555555U)
                 throw std::runtime_error("Original widescreen constants do not match the supported game");
-            memory.store<std::uint32_t>(0x402428,std::bit_cast<std::uint32_t>(21.0f/9));
-            memory.store<std::uint32_t>(0x40242C,std::bit_cast<std::uint32_t>(480.0f*21/9));
+            if(this->host.ultrawide) {
+                memory.store<std::uint32_t>(0x402428,std::bit_cast<std::uint32_t>(21.0f/9));
+                memory.store<std::uint32_t>(0x40242C,std::bit_cast<std::uint32_t>(480.0f*21/9));
+            }
         }
         QueryPerformanceFrequency(&performance_frequency);
         clock={this,[](void* context) {
@@ -1202,7 +1204,13 @@ struct Xbox::State {
             finish(cpu,texture?20:16);return;
         }
         if(api=="D3D_IsBusy") {finish(cpu,0,gpu->busy()?1:0);return;}
-        if(api=="D3D_BlockOnTime") {submit_graphics();gpu->wait();finish(cpu,8);return;}
+        if(api=="D3D_BlockOnTime") {
+            const auto issued=memory.load<std::uint32_t>(context+0x2C);
+            if(gpu->time_pending(memory.load<std::uint32_t>(context+0x30),issued,argument(cpu,0))) {
+                submit_graphics();gpu->wait();
+            }
+            finish(cpu,8);return;
+        }
         if(api=="D3D_KickOff") {
             if(cpu.registers[ecx]!=context) throw NativeBoundary(cpu.eip,"unsupported SDK submission context");
             submit_graphics();finish(cpu,0);return;
@@ -2561,6 +2569,33 @@ struct Xbox::State {
 };
 Xbox::Xbox(Xbe& image,Memory& memory,std::span<std::byte> ram,const std::filesystem::path& disc,XboxHost host):state_(std::make_unique<State>(image,memory,ram,disc,std::move(host))) {}
 Xbox::~Xbox()=default;
+void Xbox::aspect_ratio(unsigned mode) {
+    if(mode>2) throw std::runtime_error("Invalid game aspect ratio");
+    auto& s=*state_;
+    if(!s.current || s.current->cpu.registers[esp]<s.current->stack+64)
+        throw std::runtime_error("Change the game aspect ratio at a guest frame boundary");
+    auto callback=s.current->cpu;
+    callback.preempt=nullptr;callback.diagnostic=nullptr;
+    callback.floating.active=false;callback.floating.host_context=nullptr;
+    const auto stack=callback.registers[esp]-64;
+    s.host.widescreen=mode!=0;s.host.ultrawide=mode==2;
+    for(auto& thread:s.threads) thread->cpu.ultrawide=s.host.ultrawide;
+    callback.ultrawide=s.host.ultrawide;
+    s.memory.store<std::uint8_t>(0x6C934C,s.host.widescreen);
+    s.memory.store<std::uint32_t>(0x402428,mode==2?std::bit_cast<std::uint32_t>(21.0f/9):0x3FE38E39U);
+    s.memory.store<std::uint32_t>(0x40242C,mode==2?std::bit_cast<std::uint32_t>(480.0f*21/9):0x44555555U);
+    const float width=mode==2?480.0f*21/9:mode==1?480.0f*16/9:640.0f;
+    s.memory.store<std::uint32_t>(0x482FC8,std::bit_cast<std::uint32_t>((width+1.0f/16)/8));
+    // Verified original leaf routines refresh the canvas and all five camera aspects.
+    FloatingScope floating(callback.floating);
+    for(const auto entry:{0xADCA0U,0xADD70U}) {
+        callback.registers[esp]=stack;callback.eip=0;
+        s.memory.store<std::uint32_t>(stack,return_sentinel);
+        invoke_native(callback,s.memory,entry);
+        if(callback.eip!=return_sentinel || callback.registers[esp]!=stack+4)
+            throw NativeBoundary(entry,"aspect refresh has an unexpected ABI");
+    }
+}
 void Xbox::performance_recording(bool enabled) {if(state_->audio) state_->audio->recording(enabled);}
 void Xbox::output_gain(float gain) {state_->output_gain=gain;if(state_->audio) state_->audio->output_gain(state_->host.mute_audio?0:gain);}
 PerfCounters Xbox::performance_counters() const {
