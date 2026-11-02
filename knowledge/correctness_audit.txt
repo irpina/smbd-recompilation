@@ -1,0 +1,410 @@
+Source correctness audit research - 2026-11-01
+
+Target: smbd-usa-v1-9b49918b
+XBE SHA256: 9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2
+XISO: Super Monkey Ball Deluxe/Super Monkey Ball Deluxe (USA).xiso.iso
+Expected XISO SHA256: 19C0C8356308E8D96480A1AB8F3DED6C379CC057CFCEFD409DC6F7E6467E5C26
+Host: Windows x64, AMD Ryzen 5 5600X, NVIDIA GeForce RTX 5060 Ti.
+
+Scope and method
+
+Reviewed src interfaces and implementation families for executable validation,
+address/layout preservation, control-flow recovery, instruction lowering, native
+services, rendering, audio, input, installation, settings and diagnostics. Used
+the supplied XISO and bounded original-XBE disassembly, the existing indexed
+analysis, a sequential Clang static-analyzer pass over Windows C++ translation
+units, and focused native diagnostics. Generated data and diagnostic cases stay
+under build/. No Python, runtime instruction decoding or new test framework.
+
+Existing edits to PLAYTEST.txt, boot.cpp, xbox.cpp and xbox.h were present when
+this audit began and were preserved. This report covers the working-tree source.
+
+Corrections
+
+1. Pending I/O could signal freed/reused guest objects (high priority).
+   queue_io retained a host OpenFile but kept only unreferenced guest file/event
+   addresses. NtClose could recycle those slots before dispatch_io wrote their
+   completion signals. Pending requests now retain both guest objects and release
+   them after completion. File-handle waits now retain the enclosing FILE_OBJECT
+   when waiting on its event at +0x38. Immediate asynchronous failures and empty
+   requests also restore the file completion signal instead of leaving it reset.
+   The new check-services command uses real asynchronous reads from the verified
+   XISO, closes both handles before collecting completion, allocates another
+   object, checks original XBE bytes and event signals, and checks final release.
+   It uses isolated output storage and does not boot the game or open audio.
+   Contracts: Xbox kernel NtReadFile ordinal 219, NtClose 187, NtOpenFile 202;
+   native Xbox FILE_OBJECT packing and existing original SDK callers.
+   Sources:
+   https://raw.githubusercontent.com/XboxDev/nxdk/master/lib/xboxkrnl/xboxkrnl.h
+   https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntreadfile
+   https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-obdereferenceobject
+
+2. Optimized sprite search changed a defined CPU flag (low priority).
+   The original 00073900 exits a successful search after CMP tag,needle. The
+   replacement used logic_flags, which retains AF, while an equal CMP clears it.
+   The successful path now uses sub_flags for the original equal comparison.
+   The existing CPU diagnostic exercises this with every arithmetic flag set.
+   Evidence: build/logs/correctness-audit-sprite-original.json; the complete
+   original routine signature remains checked by the lowering code.
+
+3. Controller rumble stopped after an invented one-second timeout (medium).
+   Original XInputSetState at 00342317 sends motor state without a duration.
+   Input::rumble supplied 1000 ms to SDL and never renewed it. The input provider
+   now keeps the requested motor state, renews before SDL expiration, clears it
+   on disconnect and honors an explicit zero-motor command. The virtual-device
+   input diagnostic checks persistence beyond one second and explicit stopping.
+   SDL also handles device-specific hardware refresh; duration zero would disable
+   that resend in the pinned SDL implementation, so it is not used as a shortcut.
+   Sources (the SDL revision matches CMakeLists.txt):
+   https://raw.githubusercontent.com/libsdl-org/SDL/829a65d769d935c4852f8159e964312c0957260a/src/joystick/SDL_joystick.c
+   https://raw.githubusercontent.com/libsdl-org/SDL/829a65d769d935c4852f8159e964312c0957260a/include/SDL3/SDL_gamepad.h
+
+4. Cubemap mip chains ignored Xbox face alignment (medium).
+   GPU range calculation and native upload treated six faces as tightly packed.
+   Each Xbox face starts on a 128-byte boundary, including its whole mip chain.
+   Both paths now account for that spacing. The texture-cache diagnostic draws
+   all six faces at each of two mip levels, with distinct padding bytes so a
+   wrong face offset cannot accidentally pass. No claim is made that this format
+   was the cause of an observed title scene defect; this fixes the supported
+   renderer's cubemap data contract.
+   Sources:
+   https://raw.githubusercontent.com/xemu-project/xemu/master/hw/xbox/nv2a/nv2a_regs.h
+   https://raw.githubusercontent.com/xemu-project/xemu/master/hw/xbox/nv2a/pgraph/vk/texture.c
+
+5. Replay rejected resources below the capture writer's limit (medium).
+   Captures permit 128 MiB of binary data, while replay rejected cumulative
+   resource reads above 64 MiB. The reader now uses the writer's 128 MiB total
+   limit and retains its separate 64 MiB per-resource bound. It still streams
+   records and enforces resource, draw and stream limits.
+
+6. Disc filenames could become Windows drive-relative output paths (high).
+   Disc::directory rejected separators and dot components but accepted colons.
+   A name such as C:escape.txt is a Windows path/stream expression, not a safe
+   extraction component. Colons are now rejected when directory nodes are read,
+   before extraction joins a filename to its output directory. A small synthetic
+   XISO directory reproduces acceptance by the old tool and rejection after the
+   fix; it does not contain game media. The supported disc remains accepted.
+   Source:
+   https://learn.microsoft.com/en-us/cpp/standard-library/path-class
+
+7. Texture border addressing silently used black instead of the guest color
+   (medium). Border addressing was supported, but NV097's per-stage border-color
+   method at 1B24 + stage*40 was absent from RenderState and the native sampler.
+   The bridge now carries that color into D3D11 and includes it in the pipeline
+   cache key. The texture diagnostic checks two distinct colors outside the
+   image, including a color change on an otherwise identical sampler.
+   Source:
+   https://raw.githubusercontent.com/xemu-project/xemu/master/hw/xbox/nv2a/pgraph/gl/texture.c
+
+8. Querying an aliased allocation indexed outside its page metadata (high).
+   NtQueryVirtualMemory used allocation(), which normalizes native guest RAM
+   aliases, then subtracted the physical allocation base from the unnormalized
+   query address. A valid 80000000/F0000000 alias therefore produced an enormous
+   page index. It now uses the physical offset for metadata lookup and preserves
+   the requested alias in returned region addresses. check-services exercises an
+   interior address in the same allocation through all three supported mappings.
+
+Static-analysis safeguard
+
+The analyzer flagged a possible oversized shift in register-preservation proofs
+(value_preserved, decoder.cpp). Both preservation helpers now reject register
+indices outside the eight guest general registers before using a bit mask. The
+existing recovery callers already try to establish that invariant; this check
+makes it local and prevents undefined behavior if an invalid index reaches them.
+It is recorded separately from the eight behavior defects above.
+
+An investigated behavior intentionally preserved
+
+Audio::positions adds loop_start after reducing play+ahead modulo loop_size.
+Although subtracting loop_start first looks more conventional, original
+0033E494 explicitly divides the unadjusted sum at 0033E518 and then adds the
+loop start at 0033E52C. Changing this would break agreement with this executable.
+Evidence: build/logs/correctness-audit-audio-position-core.json.
+
+Source coverage
+
+- disc, disc_cache, file, crypto, xbe, installation, pipeline: bounded reads,
+  hash/target checks, directory handling, extraction, save publication and TLS.
+- decoder, recompiler, batch: bounded CFG and callback proofs, conservative
+  joins/barriers, checked table dispatch, register/flag operations, stack and
+  memory operations, x87/MMX/SSE helper ABI, generated roots and source identity.
+- cpu, floating, cpu_floating.asm, frame_clock, frame_step, thread_abi,
+  native_guest_roots: memory aliases, integer edge behavior, host/guest floating
+  state, cooperative checkpoints, timing transformations and fixed entry tables.
+- xbox and boot: service bindings, files and completion, object references,
+  waits/APCs, fibers, memory allocation, input/audio/graphics bindings, failure
+  propagation and structured reporting.
+- gpu, render, vertex_program, shaders, shader_compiler, antialiasing,
+  frame_replay: resource bounds/lifetimes, format conversion, mip/face layout,
+  shader lowering, render states, primitive conversion, presentation and replay.
+- input, audio: mappings/ranges, connection state, motor state, codec blocks,
+  play/loop regions, positions, mixing, synchronization and muted output timing.
+- main, settings, ui_theme, installer, automation: command parsing, application
+  lifetime, settings persistence, controller capture, native installation paths,
+  cancellation/publication, bounded automation and failure exit status.
+- diagnostics, diagnostics_posix, performance, cpu_diagnostics, tool and all
+  corresponding headers: report bounds, crash/watch handling, timing/counter
+  accounting, CLI failures and diagnostic entry points.
+
+Acceptance limits
+
+An audit and passing diagnostics do not prove every possible game state. Existing
+knowledge/runtime_progress.json already records incomplete full-game validation
+and an unmet 360 Hz target. Native game batch builds are explicitly Windows x64
+only in CMakeLists.txt. Linux/macOS service, graphics and CPU backends required by
+DESIGN.txt are not implemented/validated by these changes. POSIX diagnostic code
+was reviewed but cannot be compiled or run against native POSIX APIs on this
+Windows host. Original-video parity, all stages/party games and Mac hardware
+performance remain separate acceptance work.
+
+Validation results
+
+- tools/Build.ps1 -Stage Analysis -AllowPartial -Workers 1, followed after the
+  fixes by -Stage Game -AllowPartial -Workers 1 and the smbd-tool release target:
+  successful. 10,628 compiled/closed functions, 33 native platform replacements,
+  909,834 discovered instructions, zero unresolved call sites.
+- Full XISO SHA256 matches source_media.json. Its embedded default.xbe matches
+  supported_target.json. The native/Ghidra byte comparison checks 642,862 indexed
+  instructions, including 27 folded FWAIT pairs, with zero failures.
+- Sequential Clang analyzer pass: 29 Windows C++ translation units. One possible
+  register-index shift warning; guarded and clean on the decoder rerun. Existing
+  compiler aggregate/range-copy warnings remain; LLVM discarded stale profile
+  counts for the revised sprite helper. These were not build errors.
+- CPU: 20 cases; native services: 33 checks; SDL input: 58 cases; audio: 37 cases;
+  clock scheduling: 29 checks. All pass.
+- Texture/cache: 19 cases (including 64 allocation-reuse cycles, two border colors
+  and six cube faces at two mip levels); bump mapping: 16; image copying: 20;
+  presentation/settings: 167 checks. All pass with clean D3D11 validation.
+- Performance-recorder and hardware-watch diagnostics pass. These check the
+  diagnostic machinery, not achievement of the gameplay frame-time target.
+- Story Mode, isolated fresh storage, native resolution, widescreen, 60 Hz,
+  --hidden --mute --input knowledge/first_level_input.txt --stop-after-input:
+  exit 0, 3,080 frames, 938,148 draws, all 27 controller steps/four waits completed,
+  audio muted, final capture written without error, 51.655 source seconds.
+- Replay of the existing verified 370-draw capture
+  build/captures/frame-1793467501945-273872341700: exit 0, zero changed RGB pixels
+  versus that recomp capture, MSAA 4x and AF 16x, no D3D11 errors. This does not
+  establish parity against an original Xbox video reference.
+- A separate replay admission fixture reads 70 MiB of vertex payload successfully.
+  Extending it beyond 128 MiB is rejected with exit 1 and the expected budget
+  error. That fixture deliberately repeats one draw and does not test image parity.
+- The synthetic colon-containing disc filename is rejected with exit 1; the
+  supported disc is accepted. git diff --check passes. Created analysis/build/
+  diagnostic/game processes were checked after completion; none remain running.
+
+Machine-readable results: build/logs/correctness-audit-validation.json.
+Source fingerprint inventory: build/logs/correctness-source-manifest.json.
+Detailed reports, fixtures and the final Story Mode PNG are under build/logs/
+with the correctness- prefix. Game storage and settings used for this audit also
+stay there. No user settings, saves or supplied media were overwritten.
+
+Second correctness pass - 2026-11-01
+
+Revisited the translation helpers, native services, shader/vertex paths, file
+handling, presentation and diagnostic boundaries. Kept the first-pass fixes and
+all pre-existing edits. The XISO's embedded executable was verified again, and
+small original-code ranges were decoded into correctness-pass2-*-cfg.json.
+The first-pass analyzer already covered all 29 Windows C++ translation units;
+the second pass adds focused service and presentation cases to the existing tool.
+
+Additional corrections
+
+1. Synchronous unbuffered reads/writes and FilePositionInformation seeks skipped
+   the sector checks applied to asynchronous I/O. One shared predicate now checks
+   both kinds of transfers and seeks: 2048-byte sectors on the mounted disc and
+   512-byte sectors on native storage. Buffered transfers retain byte addressing.
+   Failed transfers report zero bytes and leave the position/file size unchanged.
+   Original call evidence: IAT 347554/347558; read 308E4E and write 30900E.
+   The original code's ordinary heap buffers remain valid; host DMA pointer
+   alignment is not imposed on the guest's buffered native handles.
+
+2. A request such as UINT32_MAX bytes reached the checked page-rounding helper
+   and stopped execution instead of returning allocation failure. The allocator
+   now checks the bounded RAM size, alignment and physical-address limits first.
+   System/contiguous allocation returns null; NtAllocateVirtualMemory returns
+   STATUS_NO_MEMORY. No allocation is installed on failure. Original 305F7A
+   calls NtAllocateVirtualMemory through IAT 3475C4 and tests its failure result
+   at 305F80/305F82, translating failure to null at 305F8F.
+
+3. NtFreeVirtualMemory could find an allocation using a normalized alias, then
+   calculate page iterators using the unnormalized address. Oversized decommit
+   ranges could also overflow before validation. It now rejects addresses and
+   byte counts outside the reservation before rounding or forming page iterators.
+   Valid decommit still changes only the selected pages; release still frees the
+   complete original reservation.
+
+4. Allocation lookup discarded every address's high nibble, allowing an unmapped
+   prefix such as 1xxxxxxx to identify an unrelated live allocation. Lookup now
+   accepts only low RAM and the 8xxxxxxx/Fxxxxxxx mappings installed by the native
+   memory bridge. Queries for other prefixes fail rather than reporting RAM or
+   allowing a free/protection operation to target it.
+
+5. Window presentation reused the 4096-pixel guest-image guard, so a valid 5120-
+   pixel desktop window stopped rendering. Presentation now uses the D3D11
+   feature-level-11 texture dimension limit (16384). Guest image/texture inspection
+   limits stay bounded independently. A hidden 5120x72 window is checked at both
+   internal resolution scales, including readback and D3D11 validation.
+
+Independent contract sources
+
+- https://raw.githubusercontent.com/XboxDev/nxdk/master/lib/xboxkrnl/xboxkrnl.h
+  Xbox file option bits, native memory-service declarations and calling layouts.
+- https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntreadfile
+- https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntcreatefile
+  Unbuffered length, offset and file-position sector requirements.
+- https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-mmallocatecontiguousmemory
+- https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-zwfreevirtualmemory
+  Failed allocations return null/status; decommit ranges cover reserved pages.
+- https://learn.microsoft.com/en-us/windows/win32/direct3d11/overviews-direct3d-11-resources-limits
+  Feature-level-11 texture dimension limit; the renderer requires this level.
+- https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nc-wdm-kdeferred_routine
+  Timer DPC system arguments are unused; no change was needed.
+- https://xboxdevwiki.net/Memory
+- https://xboxdevwiki.net/MCPX_HLE
+  Reverse-engineered physical/shadow memory and initial virtual address maps,
+  checked alongside the native bridge's actual installed mappings.
+
+Checks that did not warrant a change
+
+The timer-DPC system arguments are documented as unused for CustomTimerDpc, so
+the zero arguments were retained. The optimized combiner shaders already apply
+texture alpha kill and the shared alpha comparison. Relative vertex constants
+already return zero for out-of-bank reads; xemu's own unresolved address-rule
+comment did not establish grounds for a change. Original audio position arithmetic
+remains as established in the first-pass XBE evidence.
+
+Second-pass evidence uses build/logs/correctness-pass2-*.
+
+Final second-pass validation
+
+- Batched Game build and full diagnostic-tool link succeed with one worker.
+  All 10,628 original functions remain compiled; zero unresolved call sites.
+- The XISO's embedded default.xbe passes target verification. Service checks
+  read its actual XBE header bytes, including an aligned 2048-byte transfer.
+- Native services: 104 checks, including both file sector sizes, rejected
+  synchronous/asynchronous lengths, rejected seeks/writes, oversized allocation
+  failure, invalid decommit addresses/ranges and four unmapped address prefixes.
+- Presentation: 430 checks, including 5120-pixel hidden windows at 1x/4x scale,
+  three aspects and seven live game graphics-setting changes. D3D11 is clean.
+- CPU, SDL input, offline audio, timing, texture/cache, bump mapping and image
+  copying all pass. The input check reports 58 cases; CPU 20 and audio 37.
+- Sequential Clang analyzer rerun on xbox.cpp, render.cpp and settings.cpp:
+  zero findings, zero errors. Existing aggregate-initializer build warnings remain.
+- Final-build Story Mode run: exit 0, 3,080 frames, 924,719 draws, 3,077 logic
+  steps, all 27 controller steps/four waits complete, 51.649 source seconds,
+  audio muted, final PNG written without error. Fresh private settings/storage.
+- Final-build replay: all 370 captured draws, MSAA 4x/AF 16x, zero changed RGB
+  pixels versus the saved recomp capture; no D3D11 errors. This remains a recomp
+  regression check, not proof of original-Xbox visual parity.
+- All 61 source-file fingerprints remain unchanged after final validation;
+  git diff --check passes and no created game/tool/analyzer/compiler/linker
+  processes remain running. No user saves/settings or source media were replaced.
+
+Aggregate result: build/logs/correctness-pass2-validation.json (passed=true).
+Source inventory: build/logs/correctness-pass2-source-manifest.json.
+Final image: build/logs/correctness-pass2-final-story.png.
+Original-Xbox image parity, sustained frame-time acceptance and Linux/macOS
+hardware validation remain outside what these correctness checks establish.
+
+Third correctness pass - 2026-11-01
+
+Revisited CPU instruction lowering, shared-memory helpers, native object/file
+services, GPU submission and shader state, audio, input, installation and replay
+boundaries. The XISO's embedded executable passes target verification again.
+Source edits and results from both earlier passes are preserved.
+
+Additional findings
+
+1. REP MOVS overlap was decided from guest virtual addresses. Two distant guest
+   aliases can refer to the same overlapping RAM. The helper incorrectly selected
+   memmove in that case, preserving a snapshot instead of reading earlier writes
+   as the original repeated instruction does. It now compares resolved backing
+   addresses, retaining element order for forward and reverse harmful overlaps.
+   Original _memmove 30D820 compares guest pointers at 30D834/30D838 and takes
+   the REP MOVSD path at 30D853 for the aliased case. Its complete bounded CFG
+   contains 231 instructions. Before the fix, the native CPU probe of that actual
+   routine copied successive input words through the alias; the expected result
+   repeats its first word after each overlapping write. The new diagnostic also
+   checks the returned guest address, three alias pairs and reverse copying.
+
+2. Append-only writes were treated as ordinary positioned writes. The service
+   sought using an offset that append-only handles must ignore and calculated
+   the reported ending position from that ignored offset. Such handles also do
+   not need a seek operation to append. Both synchronous and asynchronous writes
+   now resolve append-only requests to EOF, leave native appending to the native
+   handle, and report the resulting synchronous position. Diagnostics append
+   actual XISO-derived header bytes with a supplied zero offset and inspect the
+   resulting prefix, suffix, size, status and guest file-object position.
+   Original SDK write call 30424E uses NtWriteFile IAT 347558 (ordinal 236).
+
+3. File-opening paths kept GENERIC_READ/WRITE/EXECUTE/ALL request bits rather
+   than expanding them to file-specific rights. Among other consequences, a
+   GENERIC_ALL request bypassed the disc's read-only access mask and access
+   queries returned unresolved generic bits. The same file-rights mapping is
+   required before disc validation and native file creation. This also keeps
+   sharing checks and append-only detection based on concrete access rights.
+   Execute-only opens also bypassed read-sharing restrictions. Read sharing now
+   accounts for both data and execution access, with the corresponding packed
+   FILE_OBJECT access/share bits kept consistent. The data-read service still
+   requires FILE_READ_DATA; execution access does not grant direct data reads.
+   Metadata-only opens are excluded from data-sharing restrictions in both
+   directions, and publish no data/share access bits. The full-access native
+   diagnostic compares against a direct Windows open instead of assuming this
+   account can obtain ownership-changing rights on the host file.
+
+Contract sources for the third pass
+
+- https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/x86-instructions
+  String operations advance their addresses per element and REP repeats them.
+- https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntwritefile
+  Append-only writes ignore ByteOffset; synchronous I/O maintains file position.
+- https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfilepointerex
+  Seeking has its own native access requirements; append-only I/O needs no seek.
+- https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntcreatefile
+  The four generic file access flags map to specific file rights.
+- https://raw.githubusercontent.com/XboxDev/nxdk/master/lib/xboxkrnl/xboxkrnl.h
+  Xbox API signatures, generic/file-right constants and object layouts.
+- https://doxygen.reactos.org/d3/d60/ntoskrnl_2io_2iomgr_2file_8c.html
+  Independent NT kernel implementation: IoCheckShareAccess and IoSetShareAccess
+  classify FILE_EXECUTE together with FILE_READ_DATA for the read-share channel.
+- https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea
+  Attribute-only access is unaffected by the data-sharing flags.
+
+Evidence is under build/logs/correctness-pass3-*. The original-memory-copy
+baseline is correctness-pass3-copy-before.json, with its bounded recipe, source
+bytes and 30D820 CFG saved alongside it. Final validation follows below.
+
+Final third-pass validation
+
+- Both executables build successfully with one compiler/linker worker. The shared
+  CPU-header fix rebuilt the 512 CPU shards; all 10,628 original functions remain
+  compiled and there are zero unresolved call sites. Offline shaders are reused.
+- The exact original 30D820 probe now produces the expected repeated first word.
+  Before/after source executable, memory snapshot and recipe hashes are identical.
+  correctness-pass3-copy-comparison.json records both outputs and the expectation.
+- CPU: 21 cases, including the copy regression. Native services: 171 checks for
+  append, mapped-rights, execute-sharing and metadata-only cases, among others.
+  Full-access native open
+  is denied by this account's host permissions, matching the direct Windows
+  reference; the diagnostic records host_full_access_allowed=false.
+- SDL input: 58 cases; offline audio: 37; timing: 29. Texture/cache, bump mapping
+  and image copying also pass. Presentation: 430 checks, including live game
+  setting changes and hidden 5120-pixel windows. D3D11 validation is clean.
+- Sequential Clang analyzer rerun on cpu_diagnostics.cpp and xbox.cpp, including
+  the changed cpu.h helper: zero findings and errors. Existing compiler aggregate
+  initialization warnings remain.
+- Fresh private Story Mode run: exit 0, 3,080 frames, 923,781 draws, 3,077 logic
+  steps, all 27 controller steps/four waits complete, 51.614 source seconds,
+  audio muted and final PNG written without error.
+- Replay of the existing verified 370-draw capture: MSAA 4x/AF 16x, zero changed
+  RGB pixels compared with that saved recomp capture; no D3D11 errors.
+- All 61 source fingerprints remain unchanged during final validation. Only
+  cpu.h, cpu_diagnostics.cpp and xbox.cpp differ from the second-pass source
+  inventory. All previous edits are preserved. git diff --check passes and no
+  created game/tool/analyzer/compiler/linker processes remain running.
+
+Aggregate result: build/logs/correctness-pass3-validation.json (passed=true).
+Source inventory: build/logs/correctness-pass3-source-manifest.json.
+Final image: build/logs/correctness-pass3-story.png.
+As before, these checks do not establish original-Xbox visual parity, sustained
+frame-time acceptance or Linux/macOS hardware validation.

@@ -147,7 +147,7 @@ D3D11_STENCIL_OP stencil_operation(std::uint32_t value) {
     default:throw std::runtime_error("Unsupported stencil operation");
     }
 }
-using PipelineKey = std::array<std::uint32_t, 40>;
+using PipelineKey = std::array<std::uint32_t, 44>;
 PipelineKey pipeline_key(const RenderState& state) {
     PipelineKey key{};
     std::size_t i = 0;
@@ -155,7 +155,7 @@ PipelineKey pipeline_key(const RenderState& state) {
          std::uint32_t(state.cull), std::uint32_t(state.front_ccw),
          state.depth_function, state.blend_source, state.blend_destination, state.blend_equation,
          state.cull_face, state.color_mask}) key[i++] = value;
-    for (unsigned n = 0; n < 4; ++n) for (auto value : {state.texture_address[n], std::uint32_t(state.linear_filter[n]),state.texture_filter[n],state.texture_control[n]}) key[i++] = value;
+    for (unsigned n = 0; n < 4; ++n) for (auto value : {state.texture_address[n],state.texture_border[n],std::uint32_t(state.linear_filter[n]),state.texture_filter[n],state.texture_control[n]}) key[i++] = value;
     for(auto value : {std::uint32_t(state.stencil_test),state.stencil_function,state.stencil_read_mask,state.stencil_write_mask,
         state.stencil_fail,state.stencil_depth_fail,state.stencil_pass,std::uint32_t(state.polygon_offset),
         std::bit_cast<std::uint32_t>(state.polygon_offset_scale),std::bit_cast<std::uint32_t>(state.polygon_offset_bias),std::uint32_t(state.scissor_test)}) key[i++]=value;
@@ -353,6 +353,7 @@ struct Renderer::Impl {
     ComPtr<ID3D11VertexShader> display_vs;
     ComPtr<ID3D11PixelShader> display_ps;
     ComPtr<ID3D11SamplerState> display_sampler;
+    ComPtr<ID3D11SamplerState> image_sampler;
     ComPtr<ID3D11RasterizerState> display_raster;
     ComPtr<ID3D11DepthStencilState> display_depth;
     ComPtr<ID3D11VertexShader> clear_vs;
@@ -830,6 +831,55 @@ void Renderer::copy_target(std::uint32_t destination) {
     *found->second.dirty=true;
     auto view=r.rtv.Get();r.context->OMSetRenderTargets(1,&view,r.dsv.Get());
 }
+void Renderer::write_region(std::uint32_t target,std::uint32_t x,std::uint32_t y,
+                            std::uint32_t width,std::uint32_t height,Bytes pixels,std::uint32_t pitch) {
+    auto& r=*impl_;
+    const auto found=r.targets.find(target);
+    if(r.recording || found==r.targets.end()) throw std::runtime_error("Write an existing color image outside frame submission");
+    const auto& output=found->second;
+    if(x>output.width || y>output.height || width>output.width-x || height>output.height-y)
+        throw std::runtime_error("Image write exceeds its color surface");
+    if(!width || !height) return;
+    const auto bpp=output.color_format==SurfaceColor::rgb565?2U:4U;
+    const auto row=width*bpp;
+    if(pitch<row || std::uint64_t(height-1)*pitch+row>pixels.size()) throw std::runtime_error("Truncated image write payload");
+    PerfScope scope(r.profile,PerfPhase::texture_upload);
+    // Compact rows so a short final row never reads beyond mapped guest RAM.
+    std::vector<std::byte> packed(std::size_t(row)*height);
+    for(unsigned i=0;i<height;++i) std::memcpy(packed.data()+std::size_t(i)*row,pixels.data()+std::size_t(i)*pitch,row);
+    D3D11_TEXTURE2D_DESC description{};description.Width=width;description.Height=height;
+    description.MipLevels=description.ArraySize=description.SampleDesc.Count=1;
+    description.Format=bpp==2?DXGI_FORMAT_B5G6R5_UNORM:DXGI_FORMAT_B8G8R8A8_UNORM;
+    description.Usage=D3D11_USAGE_IMMUTABLE;description.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    const D3D11_SUBRESOURCE_DATA data{packed.data(),row,0};
+    ComPtr<ID3D11Texture2D> image;ComPtr<ID3D11ShaderResourceView> view;
+    checked(r.device->CreateTexture2D(&description,&data,&image),"Guest color image");
+    checked(r.device->CreateShaderResourceView(image.Get(),nullptr,&view),"Guest color image view");
+    if(!r.display_vs) {
+        const auto vs=r.shader(ShaderKind::display_vertex),ps=r.shader(ShaderKind::display_pixel);
+        checked(r.device->CreateVertexShader(vs.data(),vs.size(),nullptr,&r.display_vs),"Image vertex shader");
+        checked(r.device->CreatePixelShader(ps.data(),ps.size(),nullptr,&r.display_ps),"Image pixel shader");
+    }
+    if(!r.image_sampler) {
+        D3D11_SAMPLER_DESC sampler{};sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_POINT;
+        sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
+        sampler.ComparisonFunc=D3D11_COMPARISON_ALWAYS;sampler.MaxLOD=D3D11_FLOAT32_MAX;
+        checked(r.device->CreateSamplerState(&sampler,&r.image_sampler),"Image point sampler");
+    }
+    // A point-sampled pass also fills every scaled pixel and every MSAA sample.
+    r.unbind_textures();auto color=output.color_view.Get();r.context->OMSetRenderTargets(1,&color,nullptr);
+    const auto scale=r.resolution_scale;
+    const D3D11_VIEWPORT viewport{float(x*scale),float(y*scale),float(width*scale),float(height*scale),0,1};
+    const D3D11_RECT rectangle{LONG(x*scale),LONG(y*scale),LONG((x+width)*scale),LONG((y+height)*scale)};
+    r.context->RSSetViewports(1,&viewport);r.context->RSSetScissorRects(1,&rectangle);r.context->RSSetState(r.clear_raster.Get());
+    r.context->OMSetBlendState(nullptr,nullptr,UINT_MAX);r.context->OMSetDepthStencilState(r.clear_depths[0].Get(),0);
+    r.context->IASetInputLayout(nullptr);r.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    r.context->VSSetShader(r.display_vs.Get(),nullptr,0);r.context->PSSetShader(r.display_ps.Get(),nullptr,0);
+    auto input=view.Get();auto sampler=r.image_sampler.Get();
+    r.context->PSSetShaderResources(0,1,&input);r.context->PSSetSamplers(0,1,&sampler);r.context->Draw(3,0);
+    *output.dirty=true;++r.stats.texture_uploads;r.stats.texture_upload_bytes+=packed.size();
+    r.select_target(r.current_target);
+}
 void Renderer::copy_region(std::uint32_t destination,std::uint32_t source,
                           std::uint32_t sx,std::uint32_t sy,std::uint32_t dx,std::uint32_t dy,
                           std::uint32_t width,std::uint32_t height) {
@@ -986,7 +1036,8 @@ bool Renderer::display(bool published,bool wait) {
     RECT rectangle{};if(!GetClientRect(r.window,&rectangle)) throw std::runtime_error("Cannot read window dimensions");
     const auto width=static_cast<std::uint32_t>(rectangle.right),height=static_cast<std::uint32_t>(rectangle.bottom);
     if(!width || !height) return false;
-    extent(width,height);
+    if(width>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || height>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)
+        throw std::runtime_error("Window dimensions exceed the Direct3D 11 limit");
     if(!r.acquire_frame(wait)) return false;
     r.unbind_textures();r.context->OMSetRenderTargets(0,nullptr,nullptr);
     if(!r.window_view || r.window_width!=width || r.window_height!=height) {
@@ -1034,6 +1085,7 @@ std::uint32_t Renderer::upload(const TextureData& texture,bool reuse_slot) {
     case TextureFormat::a8l8: format = DXGI_FORMAT_B8G8R8A8_UNORM; bpp = 2; swizzled = true; break;
     case TextureFormat::argb4: format = DXGI_FORMAT_B4G4R4A4_UNORM; bpp = 2; swizzled = true; break;
     case TextureFormat::rgb565: format = DXGI_FORMAT_B5G6R5_UNORM; bpp = 2; swizzled = true; break;
+    case TextureFormat::rgb565_linear: format = DXGI_FORMAT_B5G6R5_UNORM; bpp = 2; break;
     case TextureFormat::argb8: format = DXGI_FORMAT_B8G8R8A8_UNORM; bpp = 4; swizzled = true; break;
     case TextureFormat::xrgb8: format = DXGI_FORMAT_B8G8R8X8_UNORM; bpp = 4; swizzled = true; break;
     case TextureFormat::argb8_linear: format = DXGI_FORMAT_B8G8R8A8_UNORM; bpp = 4; break;
@@ -1098,6 +1150,7 @@ std::uint32_t Renderer::upload(const TextureData& texture,bool reuse_slot) {
         const auto upload_slice=expand_luminance?std::size_t(upload_pitch)*h:slice;
         data[subresource] = {pixels, upload_pitch, static_cast<UINT>(upload_slice)};
         offset += size;
+        if(texture.cubemap && mip+1==texture.mip_levels) offset=static_cast<std::size_t>(cubemap_face_size(offset));
     }
     if (offset != texture.bytes.size()) throw std::runtime_error("Texture payload has trailing bytes; specify its full mip count");
     D3D11_TEXTURE2D_DESC desc{};
@@ -1188,6 +1241,7 @@ void Renderer::prepare(const RenderState& state) {
         sampler.AddressU = address_mode(state.texture_address[i] & 15);
         sampler.AddressV = address_mode((state.texture_address[i] >> 8) & 15);
         sampler.AddressW = address_mode((state.texture_address[i] >> 16) & 15);
+        const auto border=color(state.texture_border[i]);std::copy(border.begin(),border.end(),sampler.BorderColor);
         sampler.MaxAnisotropy=strength;sampler.ComparisonFunc=D3D11_COMPARISON_NEVER;
         int bias=filter&0x1FFF;if(bias&0x1000) bias-=0x2000;
         sampler.MipLODBias=mip?std::clamp(bias/256.0f,D3D11_MIP_LOD_BIAS_MIN,D3D11_MIP_LOD_BIAS_MAX):0;

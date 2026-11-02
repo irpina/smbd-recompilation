@@ -23,7 +23,7 @@ std::string compare_images(const std::filesystem::path& actual,
 enum class TextureFormat : std::uint32_t {
     argb4 = 0x04, rgb565 = 0x05, argb8 = 0x06, xrgb8 = 0x07,
     dxt1 = 0x0C, dxt3 = 0x0E, dxt5 = 0x0F,
-    argb8_linear = 0x12, a8l8 = 0x1A, xrgb8_linear = 0x1E
+    rgb565_linear = 0x11, argb8_linear = 0x12, a8l8 = 0x1A, xrgb8_linear = 0x1E
 };
 struct TextureData {
     std::uint32_t width, height;
@@ -33,6 +33,8 @@ struct TextureData {
     bool cubemap = false;
     std::uint32_t depth = 1;
 };
+// Xbox cubemap mip chains start each face on a 128-byte boundary.
+inline constexpr std::uint64_t cubemap_face_size(std::uint64_t bytes) {return (bytes+127)&~std::uint64_t(127);}
 enum class SurfaceColor {rgba8,rgb565};
 enum class SurfaceDepth {z24s8,z16};
 
@@ -59,6 +61,7 @@ struct RenderState {
     std::array<std::uint32_t, 4> texture_sources{}, texture_clip{};
     std::array<Float4,4> bump_matrices{}; // M00, M01, M10, M11; normalized texture units.
     std::array<std::uint32_t, 4> texture_address{0x030303, 0x030303, 0x030303, 0x030303};
+    std::array<std::uint32_t,4> texture_border{};
     std::array<bool, 4> linear_filter{}, alpha_kill{};
     std::array<std::uint32_t,4> texture_filter{},texture_control{0x0003FFC0,0x0003FFC0,0x0003FFC0,0x0003FFC0};
     std::uint32_t combiner_control = 0;
@@ -109,6 +112,8 @@ public:
                                 SurfaceColor=SurfaceColor::rgba8,SurfaceDepth=SurfaceDepth::z24s8,
                                 std::uint32_t shared_color=UINT32_MAX,bool reuse_slot=true);
     void grow_target(std::uint32_t target,std::uint32_t width,std::uint32_t height);
+    void write_region(std::uint32_t target,std::uint32_t x,std::uint32_t y,
+                      std::uint32_t width,std::uint32_t height,Bytes pixels,std::uint32_t pitch);
     void set_target(std::uint32_t target=0);
     void copy_target(std::uint32_t destination); // GPU copy for later sampling.
     void copy_region(std::uint32_t destination,std::uint32_t source,

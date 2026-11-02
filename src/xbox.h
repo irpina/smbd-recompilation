@@ -58,10 +58,10 @@ struct BootResult {
     std::string adapter;
     std::string capture_error;
     bool capture_written=false;
-    std::string boundary;
+    std::string boundary,failure_context;
     Cpu cpu;
     ExecutionDiagnostic diagnostic;
-    std::array<std::uint32_t,16> stack_words{};
+    std::array<std::uint32_t,64> stack_words{};
     std::uint32_t stack_word_count=0;
     std::array<std::uint64_t,512> service_calls{};
 };
@@ -80,6 +80,7 @@ public:
     void output_gain(float);
     void aspect_ratio(unsigned mode);
 private:
+    friend std::string check_services(Xbe&,const std::filesystem::path&,const std::filesystem::path&);
     friend void native_platform(Cpu&,Memory&,std::uint32_t);
     friend void native_frame_wait(Cpu&,Memory&);
     friend void native_frame_begin(Cpu&,Memory&);
@@ -93,4 +94,5 @@ private:
 };
 std::string check_boot(Xbe&,const std::filesystem::path&,std::uint32_t budget,const std::filesystem::path& capture={});
 std::string boot_report(const Xbe&,const BootResult&);
+std::string check_services(Xbe&,const std::filesystem::path& disc,const std::filesystem::path& output);
 }

@@ -98,10 +98,12 @@ constexpr auto usage =
     "  smbd-tool batch XBE SEEDS.txt FUNCTION_LIMIT INSTRUCTION_LIMIT OUTPUT.cpp [--replace] [--allow-partial] [--shards COUNT] [--report REPORT.json]\n"
 #ifdef SMBD_HAS_BATCH
     "  smbd-tool check-cpu XBE\n"
+    "  smbd-tool check-services XBE ISO NEW_OUTPUT_DIRECTORY\n"
     "  smbd-tool probe-cpu XBE CAPTURE_DIRECTORY RECIPE.txt NEW_OUTPUT.json\n"
     "  smbd-tool check-input\n"
     "  smbd-tool check-audio\n"
     "  smbd-tool check-image-copy [--warp] [--msaa 2|4|8]\n"
+    "  smbd-tool check-image-blit NEW_OUTPUT_DIRECTORY [--warp] [--msaa 2|4|8] [--scale 1..4]\n"
     "  smbd-tool check-texture-cache\n"
     "  smbd-tool check-bump-mapping\n"
     "  smbd-tool check-presentation NEW_OUTPUT_DIRECTORY [XBE ISO]\n"
@@ -180,18 +182,22 @@ int tool_main(int argc, char** argv) {
         } else if(command=="check-texture-cache" && argc==2) {
             output=smbd::Gpu::check_texture_cache();
             if(output.find("\"passed\":false")!=std::string::npos) result=3;
-        } else if(command=="check-image-copy") {
-            bool warp=false;unsigned quality=0;
-            for(int i=2;i<argc;++i) {
+        } else if(command=="check-image-copy" || command=="check-image-blit") {
+            const bool blit=command=="check-image-blit";
+            if(blit && argc<3) throw std::runtime_error(usage);
+            bool warp=false;unsigned quality=0,scale=1;
+            for(int i=blit?3:2;i<argc;++i) {
                 const auto option=std::string_view(argv[i]);
                 if(option=="--warp") warp=true;
                 else if(option=="--msaa" && i+1<argc) {
                     const auto samples=number(argv[++i]);
                     if(samples!=2 && samples!=4 && samples!=8) throw std::runtime_error(usage);
                     quality=samples==2?4:samples==4?5:6;
+                } else if(blit && option=="--scale" && i+1<argc) {
+                    scale=number(argv[++i]);if(scale<1 || scale>4) throw std::runtime_error(usage);
                 } else throw std::runtime_error(usage);
             }
-            output=smbd::check_image_copy(warp,true,quality);
+            output=blit?smbd::Gpu::check_image_blit(paths[2],warp,true,quality,scale):smbd::check_image_copy(warp,true,quality);
             if(output.find("\"passed\":false")!=std::string::npos) result=3;
         } else if(command=="check-input" && argc==2) {
             output=smbd::check_input();
@@ -207,6 +213,8 @@ int tool_main(int argc, char** argv) {
             smbd::Xbe image(paths[2]);
             output = smbd::check_cpu(image);
             if (output.find("\"passed\":false") != std::string::npos) result = 3;
+        } else if(command=="check-services" && argc==5) {
+            smbd::Xbe image(paths[2]);output=smbd::check_services(image,paths[3],paths[4]);
         } else if(command=="probe-cpu" && argc==6) {
             if(std::filesystem::exists(paths[5])) throw std::runtime_error("CPU probes require a new output file");
             smbd::Xbe image(paths[2]);

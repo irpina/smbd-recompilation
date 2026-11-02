@@ -516,7 +516,10 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
                 const auto handled=ui.event(event);
                 if(!handled && event.type==SDL_EVENT_KEY_DOWN && !event.key.repeat && event.key.scancode==SDL_SCANCODE_F8) capture_launcher();
             }
-            if(!renderer.display()) {SDL_Delay(10);continue;}
+            if(!renderer.display(true)) {
+                renderer.set_target(0);renderer.clear(0xFF100C06);
+                if(!renderer.display()) {SDL_Delay(10);continue;}
+            }
             ui.draw(false,false,0,capture_launcher,[]{});
             if(!launcher_capture.empty()) {
                 smbd::save_png(renderer.read_display(),launcher_capture/"window.png");settings.save(launcher_capture/"settings.cfg");

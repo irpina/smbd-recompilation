@@ -57,7 +57,7 @@ RenderState gpu_render_state(std::span<const std::uint32_t,2048> registers,std::
             auto& matrix=s.bump_matrices[i];
             for(unsigned n=0;n<4;++n) matrix[n]=real(reg(method+0x28+n*4));
             const auto format=(reg(method+4)>>8)&255;
-            if(format==0x12 || format==0x1E) {
+            if(format==0x11 || format==0x12 || format==0x1E) {
                 const auto image=reg(method+0x1C),width=image>>16,height=image&65535;
                 if(!width || !height) throw std::runtime_error("Invalid linear bump texture dimensions");
                 matrix[0]/=width;matrix[2]/=width;matrix[1]/=height;matrix[3]/=height;
@@ -65,6 +65,7 @@ RenderState gpu_render_state(std::span<const std::uint32_t,2048> registers,std::
         }
         s.texture_sources[i]=i<2?0:(reg(0x1E78)>>(8+i*4))&15;
         s.texture_clip[i]=(reg(0x17F8)>>(i*4))&15;s.texture_address[i]=reg(method+8);
+        s.texture_border[i]=reg(method+0x24);
         const auto filter=reg(method+0x14);
         const bool sampled=s.texture_modes[i] && s.texture_modes[i]!=4 && s.texture_modes[i]!=5;
         s.texture_filter[i]=sampled?filter:0;s.texture_control[i]=sampled?reg(method+12):0x0003FFC0;
@@ -267,9 +268,30 @@ struct Gpu::Impl {
         return a[0]==b[0] && (a[2]&~255U)==(b[2]&~255U) && ((a[2]&15)==3)==((b[2]&15)==3) &&
             (a[3]&0xFFFF)==(b[3]&0xFFFF);
     }
+    void write_color(const std::array<std::uint32_t,4>& key,const Surface& surface,
+                     std::uint32_t x,std::uint32_t y,std::uint32_t width,std::uint32_t height) {
+        if(!width || !height) return;
+        const auto pitch=key[3]&0xFFFF,bpp=(key[2]&15)==3?2U:4U;
+        if(std::uint64_t(x+width)*bpp>pitch) throw std::runtime_error("Color image write exceeds its guest pitch");
+        const auto address=std::uint64_t(key[0])+std::uint64_t(y)*pitch+std::uint64_t(x)*bpp;
+        const auto size=std::size_t(height-1)*pitch+std::size_t(width)*bpp;
+        if(address>UINT32_MAX) throw std::runtime_error("Color image write exceeds guest address space");
+        const Bytes pixels(static_cast<const std::byte*>(memory.access(static_cast<std::uint32_t>(address),size)),size);
+        renderer.write_region(surface.identifier,x,y,width,height,pixels,pitch);
+        if(capture_active) capture_try([&] {
+            const auto data=capture_data(std::format("surface-{}-{}-{}.bin",surface.identifier,x,y),pixels);
+            capture_record(std::format("{{\"type\":\"surface_write\",\"resource\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"pitch\":{},\"size\":{},\"guest_data\":{}}}",
+                surface.identifier,x,y,width,height,pitch,size,data));
+        });
+    }
     void grow_color(const std::array<std::uint32_t,4>& key,Surface& surface,std::uint32_t width,std::uint32_t height) {
+        const auto old_width=surface.width,old_height=surface.height;
         flush();renderer.grow_target(surface.identifier,width,height);
         for(auto& [other,image]:targets) if(same_color(key,other)) {image.width=width;image.height=height;}
+        if(((key[2]>>8)&15)==1) {
+            write_color(key,surface,old_width,0,width-old_width,old_height);
+            write_color(key,surface,0,old_height,width,height-old_height);
+        }
     }
     void select_target() {
         const auto horizontal=reg(0x200),vertical=reg(0x204);
@@ -283,13 +305,15 @@ struct Gpu::Impl {
                 reg(0x208),reg(0x20C),reg(0x210),reg(0x214)));
         const auto format=reg(0x208),type=(format>>8)&15;
         if(type!=1 && type!=2) throw std::runtime_error("Unsupported NV097 surface layout");
-        const auto width=type==2?1U<<((format>>16)&15):(horizontal&0xFFFF)+clip_width;
-        const auto height=type==2?1U<<((format>>24)&15):(vertical&0xFFFF)+clip_height;
+        auto width=type==2?1U<<((format>>16)&15):(horizontal&0xFFFF)+clip_width;
+        auto height=type==2?1U<<((format>>24)&15):(vertical&0xFFFF)+clip_height;
         const std::array key{reg(0x210),reg(0x214),format,reg(0x20C)};
         auto found=targets.find(key);
         if(found==targets.end()) {
             std::uint32_t shared=UINT32_MAX;
-            for(const auto& [other,image]:targets) if(same_color(key,other) && image.width==width && image.height==height) {
+            for(auto& [other,image]:targets) if(same_color(key,other)) {
+                width=std::max(width,image.width);height=std::max(height,image.height);
+                grow_color(other,image,width,height);
                 shared=image.identifier;break;
             }
             flush();found=targets.emplace(key,Surface{renderer.create_target(width,height,color==3?SurfaceColor::rgb565:SurfaceColor::rgba8,
@@ -304,7 +328,7 @@ struct Gpu::Impl {
     std::uint32_t texture(unsigned stage,ProgramView& view) {
         const auto method=0x1B00+stage*0x40,format=reg(method+4),image=reg(method+0x1C),pitch=reg(method+0x10)>>16;
         const auto code=(format>>8)&255;
-        const bool linear=code==0x12 || code==0x1E;
+        const bool linear=code==0x11 || code==0x12 || code==0x1E;
         const auto width=linear?image>>16:1U<<((format>>20)&15),height=linear?image&0xFFFF:1U<<((format>>24)&15);
         const auto depth=((format>>4)&15)==3?1U<<(format>>28):1U;
         const auto mips=(format>>16)&15;
@@ -313,17 +337,19 @@ struct Gpu::Impl {
         const bool cube=(format&4)!=0;
         // Sampling a GPU-produced surface must see its current GPU contents,
         // rather than the original RAM allocation used for ordinary textures.
-        if(!cube && depth==1 && mips==1) for(const auto& [key,surface]:targets) {
+        if(!cube && depth==1 && mips==1) for(auto& [key,surface]:targets) {
             const auto surface_format=key[2],surface_color=surface_format&15,surface_type=(surface_format>>8)&15;
-            const bool matching_color=surface_color==3?code==5:(code==6 || code==7 || code==0x12 || code==0x1E);
-            if(key[0]==(reg(method)&0x0FFFFFFF) && surface.width==width && surface.height==height && matching_color &&
+            const bool matching_color=surface_color==3?(code==5 || code==0x11):(code==6 || code==7 || code==0x12 || code==0x1E);
+            if(key[0]==(reg(method)&0x0FFFFFFF) && matching_color &&
+                ((surface.width==width && surface.height==height) || (linear && surface.width<=width && surface.height<=height)) &&
                 ((surface_type==1)==linear) && (!linear || (key[3]&0xFFFF)==pitch)) {
+                if(surface.width!=width || surface.height!=height) grow_color(key,surface,width,height);
                 if(linear) view.texture_scales[stage]={1.0f/width,1.0f/height,1,1};
                 return surface.identifier;
             }
         }
         unsigned bpp=0,block=0;
-        switch(code) {case 4:case 5:case 0x1A:bpp=2;break;case 6:case 7:case 0x12:case 0x1E:bpp=4;break;
+        switch(code) {case 4:case 5:case 0x11:case 0x1A:bpp=2;break;case 6:case 7:case 0x12:case 0x1E:bpp=4;break;
             case 0xC:block=8;break;case 0xE:case 0xF:block=16;break;
             default:throw std::runtime_error(std::format("Unsupported NV097 texture format 0x{:02X}",code));}
         std::uint64_t size=0;
@@ -331,7 +357,7 @@ struct Gpu::Impl {
             const auto w=std::max(1U,width>>level),h=std::max(1U,height>>level),d=std::max(1U,depth>>level);
             size+=(block?std::uint64_t((w+3)/4)*((h+3)/4)*block:std::uint64_t(linear?pitch:w*bpp)*h)*d;
         }
-        if(cube) size*=6;
+        if(cube) size=cubemap_face_size(size)*6;
         if(!size || size>64*1024*1024) throw std::runtime_error("NV097 texture payload exceeds its bound");
         const auto address=reg(method)&0x0FFFFFFF;
         const std::array key{address,format,image,pitch,reg(method+0x20)};
@@ -361,11 +387,13 @@ struct Gpu::Impl {
     void draw(std::uint32_t first,std::uint32_t count,std::span<const std::uint32_t> elements={},bool inlined=false) {
         if(!primitive || !count || count>32768 || first>0xFFFFFF-count) throw std::runtime_error("Invalid NV097 draw range");
         select_target();
-        auto& draw=draws[draw_count];draw.stream_count=0;draw.view={};draw.packed.clear();
-        draw.current=current;draw.constants=constants;draw.count=count;
-        draw.view.depth_scale=constants[58][2];
-        if(draw.view.depth_scale<=0) throw std::runtime_error("NV097 viewport depth scale was not initialized");
-        draw.state=state(draw.view);
+        ProgramView view;view.depth_scale=constants[58][2];
+        if(view.depth_scale<=0) throw std::runtime_error("NV097 viewport depth scale was not initialized");
+        // Binding a larger view can flush earlier draws to preserve their image.
+        // Reserve the next batch slot only after that binding has completed.
+        const auto render_state=state(view);
+        auto& draw=draws[draw_count];draw.stream_count=0;draw.view=view;draw.packed.clear();
+        draw.current=current;draw.constants=constants;draw.count=count;draw.state=render_state;
         // A program handle remains valid until its instruction memory or entry
         // changes. Ordinary constants and vertex streams do not change shaders.
         std::uint32_t shader;
@@ -440,11 +468,11 @@ struct Gpu::Impl {
         auto to=find(destination,destination_pitch);
         flush();
         if(to==targets.end()) {
-            if(dx || dy || width!=destination_pitch/bpp)
-                throw std::runtime_error("Initial image blit must define complete rows from the origin");
             const auto color=bpp==2?SurfaceColor::rgb565:SurfaceColor::rgba8;
             const std::array key{destination,0U,bpp==2?0x123U:0x128U,destination_pitch|(destination_pitch<<16)};
-            to=targets.emplace(key,Surface{renderer.create_target(width,height,color,SurfaceDepth::z24s8,UINT32_MAX,!capture.pending),width,height}).first;
+            const auto w=dx+width,h=dy+height;
+            to=targets.emplace(key,Surface{renderer.create_target(w,h,color,SurfaceDepth::z24s8,UINT32_MAX,!capture.pending),w,h}).first;
+            write_color(key,to->second,0,0,w,h);
         } else if(dx+width>to->second.width || dy+height>to->second.height)
             grow_color(to->first,to->second,std::max(dx+width,to->second.width),std::max(dy+height,to->second.height));
         renderer.copy_region(to->second.identifier,from->second.identifier,sx,sy,dx,dy,width,height);
@@ -763,6 +791,86 @@ void Gpu::snapshot() {
     g.target=0;
 }
 GpuStats Gpu::stats() const {return impl_->statistics;}
+std::string Gpu::check_image_blit(const std::filesystem::path& directory,bool warp,bool debug,unsigned antialiasing,unsigned scale) {
+    if(std::filesystem::exists(directory)) throw std::runtime_error("Image-blit checks require a fresh output directory");
+    std::filesystem::create_directories(directory);
+    std::vector<std::pair<std::string,bool>> cases;std::string adapter;
+    for(const bool rgb565:{false,true}) {
+        Renderer renderer(12,12,warp,debug,scale);renderer.enhancements(antialiasing,0);adapter=renderer.adapter();
+        std::vector<std::byte> ram(64*1024);Memory memory(0,ram);
+        constexpr std::array objects{GraphicsObject{0xD,0x97},GraphicsObject{0xE,0x62},GraphicsObject{0xF,0x9F}};
+        Gpu gpu(renderer,memory,0,objects);auto& g=*gpu.impl_;
+        const auto reg=[&](unsigned method)->std::uint32_t& {return g.registers[0][method/4];};
+        const auto bpp=rgb565?2U:4U,pitch=12*bpp;
+        const auto surface_format=rgb565?0x123U:0x128U;
+        reg(0x200)=reg(0x204)=8U<<16;reg(0x208)=surface_format;
+        reg(0x20C)=8*bpp|((8*bpp)<<16);reg(0x210)=0x4000;reg(0x214)=0x5000;
+        g.select_target();renderer.clear(0xB03090D0);
+        const auto source=g.target;
+        std::array<std::array<std::byte,4>,12*12> expected{};
+        constexpr std::array<std::uint32_t,4> colors{0xFFFF0000,0xFF00FF00,0xFF0000FF,0xFFFFFF00};
+        constexpr std::array<std::uint16_t,4> packed{0xF800,0x07E0,0x001F,0xFFE0};
+        for(unsigned y=0;y<12;++y) for(unsigned x=0;x<12;++x) {
+            const auto index=(x+2*y)%4,c=colors[index]-(rgb565?0U:0x80000000U);
+            if(rgb565) memory.store<std::uint16_t>(0x6000+y*pitch+x*bpp,packed[index]);
+            else memory.store<std::uint32_t>(0x6000+y*pitch+x*bpp,c);
+            expected[y*12+x]={std::byte((c>>16)&255),std::byte((c>>8)&255),std::byte(c&255),std::byte(c>>24)};
+        }
+        const auto paint=[&](unsigned x,unsigned y,unsigned width,unsigned height) {
+            const auto image=renderer.read_target(source);
+            for(unsigned row=y;row<y+height;++row) for(unsigned column=x;column<x+width;++column)
+                std::copy_n(image.rgba.begin(),4,expected[row*12+column].begin());
+        };
+        const auto compare=[&](std::string name,std::uint32_t id,unsigned width,unsigned height) {
+            const auto image=renderer.read_target(id);bool match=image.width==width*scale && image.height==height*scale;
+            for(unsigned y=0;match && y<image.height;++y) for(unsigned x=0;match && x<image.width;++x)
+                match=std::equal(expected[(y/scale)*12+x/scale].begin(),expected[(y/scale)*12+x/scale].end(),
+                    image.rgba.begin()+(std::size_t(y)*image.width+x)*4);
+            cases.emplace_back((rgb565?"RGB565: ":"ARGB8: ")+name,match);
+        };
+        const auto blit=[&](unsigned dx,unsigned dy,unsigned width,unsigned height) {
+            std::vector<std::uint32_t> words;
+            const auto packet=[&](unsigned channel,unsigned method,std::initializer_list<std::uint32_t> values) {
+                words.push_back((static_cast<unsigned>(values.size())<<18)|(channel<<13)|method);
+                words.insert(words.end(),values.begin(),values.end());
+            };
+            packet(1,0,{0xE});packet(1,0x300,{rgb565?4U:10U,8*bpp|(pitch<<16),0x4000,0x6000});
+            packet(2,0,{0xF});packet(2,0x19C,{0xE});packet(2,0x2FC,{3});
+            packet(2,0x300,{0,dx|(dy<<16),width|(height<<16)});
+            std::memcpy(memory.access(0x1000,words.size()*4),words.data(),words.size()*4);
+            gpu.submit(0x1000,0x1000+static_cast<unsigned>(words.size())*4);
+            paint(dx,dy,width,height);
+        };
+        blit(2,3,3,2);
+        const auto destination=g.targets.rbegin()->second.identifier;
+        compare("first offset copy preserves pixels outside the rectangle",destination,5,5);
+        reg(0x1B00)=0x6000;reg(0x1B04)=((rgb565?0x11U:0x12U)<<8)|(1U<<16)|(2U<<4);
+        reg(0x1B10)=pitch<<16;reg(0x1B1C)=9U<<16|8U;
+        reg(0x350)=0x8006;reg(0x344)=1;reg(0x33C)=reg(0x354)=reg(0x364)=0x207;
+        reg(0x370)=reg(0x374)=reg(0x378)=0x1E00;reg(0x2A0)=6;
+        for(unsigned i=0;i<4;++i) {reg(0x1B08+i*0x40)=0x030303;reg(0x1B14+i*0x40)=0x01010000;}
+        g.constants[58][2]=1;g.primitive=5;g.draw(0,3);
+        reg(0x1B08)=0x030303;reg(0x1B0C)=0x4003FFC0;reg(0x1B14)=0x01010000;reg(0x1E70)=1;
+        g.draw(0,6);
+        const auto texture=g.draws[0].state.textures[0];
+        cases.emplace_back((rgb565?"RGB565: ":"ARGB8: ")+std::string("texture growth retains the following queued draw"),
+            g.draw_count==1 && g.draws[0].count==6 && texture==destination);
+        g.flush();
+        cases.emplace_back((rgb565?"RGB565: ":"ARGB8: ")+std::string("texture binding retains the GPU copy"),texture==destination);
+        compare("full texture extent preserves RAM borders and copied pixels",texture,9,8);
+        renderer.set_target(source);renderer.clear(0xFFABCDEF);
+        blit(10,8,2,2);compare("later growth preserves earlier GPU writes and new RAM borders",texture,12,10);
+        reg(0x200)=reg(0x204)=12U<<16;reg(0x208)=surface_format;reg(0x20C)=pitch|(pitch<<16);
+        reg(0x210)=0x6000;reg(0x214)=0x9000;g.select_target();
+        compare("3D depth view shares the blit color image",g.target,12,12);
+        save_png(renderer.read_target(g.target),directory/(rgb565?"rgb565.png":"argb8.png"));
+        gpu.wait();cases.emplace_back((rgb565?"RGB565: ":"ARGB8: ")+std::string("D3D11 validation"),renderer.errors().empty());
+    }
+    std::string records;bool passed=true;
+    for(const auto& [name,value]:cases) {if(!records.empty()) records+=',';records+="{\"name\":"+json(name)+",\"passed\":"+(value?"true":"false")+'}';passed&=value;}
+    const auto report=std::format("{{\"format\":\"smbd-image-blit-check-v1\",\"passed\":{},\"adapter\":{},\"resolution_scale\":{},\"antialiasing\":{},\"cases\":[{}]}}",passed,json(adapter),scale,antialiasing,records);
+    write_text(directory/"report.json",report+'\n',false);return report;
+}
 std::string Gpu::check_bump_mapping() {
     Renderer renderer(8,8,false,true);
     renderer.enhancements(0,16);
@@ -846,12 +954,13 @@ std::string Gpu::check_texture_cache() {
     reg(0x1B10)=32U<<16;reg(0x1B1C)=(8U<<16)|8U;
     std::vector<std::pair<std::string,bool>> cases;
     const auto expect=[&](std::string name,bool passed) {cases.emplace_back(std::move(name),passed);};
-    const auto sample=[&](std::uint32_t id) {
+    const auto sample=[&](std::uint32_t id,bool border=false) {
         RenderState state;state.primitive=8;state.texture_modes[0]=1;state.textures[0]=id;state.final_inputs={8,0x1800};
+        if(border) {state.texture_address[0]=0x040404;state.texture_border=gpu_render_state(g.registers[0],8).texture_border;}
         std::array<Vertex,4> vertices{};
         constexpr std::array<Float4,4> positions{{{-1,1,0,1},{1,1,0,1},{1,-1,0,1},{-1,-1,0,1}}};
         constexpr std::array<Float4,4> uv{{{0,0,0,1},{1,0,0,1},{1,1,0,1},{0,1,0,1}}};
-        for(unsigned i=0;i<4;++i) {vertices[i].position=positions[i];vertices[i].uv[0]=uv[i];}
+        for(unsigned i=0;i<4;++i) {vertices[i].position=positions[i];vertices[i].uv[0]=border?Float4{2,2,0,1}:uv[i];}
         renderer.set_target(0);renderer.prepare(state);renderer.begin();renderer.draw(state,vertices);renderer.end();
         const auto image=renderer.readback();const auto pixel=(4*8+4)*4;
         return (std::uint32_t(image.rgba[pixel])<<16)|(std::uint32_t(image.rgba[pixel+1])<<8)|std::uint32_t(image.rgba[pixel+2]);
@@ -860,6 +969,8 @@ std::string Gpu::check_texture_cache() {
     memory.fill_elements<std::uint32_t>(0x4000,0xFFFF0000,64,false);
     const auto original=g.texture(0,view);
     expect("initial texture upload",sample(original)==0xFF0000);
+    reg(0x1B24)=0xFF204060;expect("texture border uses the NV097 border colour",sample(original,true)==0x204060);
+    reg(0x1B24)=0xFFCC8844;expect("border colour changes invalidate the native sampler state",sample(original,true)==0xCC8844);
     gpu.invalidate_memory(0x80005000,4096);
     expect("unrelated memory release retains the texture",g.texture(0,view)==original && g.statistics.texture_uploads==1);
     reg(0x1B20)=1;const auto alias=g.texture(0,view);reg(0x1B20)=0;
@@ -973,6 +1084,30 @@ std::string Gpu::check_texture_cache() {
     }
     g.inline_words.clear();
     expect("inline vertex packets match scalar processing, including RAM aliases and maximum packet size",inline_match);
+    // A 4x4 + 2x2 ARGB mip chain occupies 80 bytes, but each Xbox cube face
+    // starts 128 bytes after the previous one. Give padding a distinct colour.
+    memory.fill_elements<std::uint32_t>(0x6000,0xFF123456,6*128/4,false);
+    constexpr std::array<std::uint32_t,6> colors{0xFFFF0000,0xFF00FF00,0xFF0000FF,0xFFFFFF00,0xFFFF00FF,0xFF00FFFF};
+    constexpr std::array<Float4,6> directions{{{1,0,0,1},{-1,0,0,1},{0,1,0,1},{0,-1,0,1},{0,0,1,1},{0,0,-1,1}}};
+    for(unsigned face=0;face<6;++face) {
+        memory.fill_elements<std::uint32_t>(0x6000+face*128,colors[face],16,false);
+        memory.fill_elements<std::uint32_t>(0x6040+face*128,colors[face]^0x00FFFFFFU,4,false);
+    }
+    reg(0x1B00)=0x6000;reg(0x1B04)=4|(2U<<4)|(6U<<8)|(2U<<16)|(2U<<20)|(2U<<24);
+    reg(0x1B10)=0;reg(0x1B1C)=0;
+    const auto cube=g.texture(0,view);bool cube_matches=true;
+    for(unsigned mip=0;mip<2;++mip) for(unsigned face=0;face<6;++face) {
+        RenderState state;state.primitive=8;state.texture_modes[0]=3;state.textures[0]=cube;state.final_inputs={8,0x1800};
+        state.texture_filter[0]=0x01030000;state.texture_control[0]=(mip*256<<18)|(mip*256<<6);
+        std::array<Vertex,4> vertices{};
+        constexpr std::array<Float4,4> positions{{{-1,1,0,1},{1,1,0,1},{1,-1,0,1},{-1,-1,0,1}}};
+        for(unsigned i=0;i<4;++i) {vertices[i].position=positions[i];vertices[i].uv[0]=directions[face];}
+        renderer.set_target(0);renderer.prepare(state);renderer.begin();renderer.draw(state,vertices);renderer.end();
+        const auto image=renderer.readback();const auto pixel=(4*8+4)*4;
+        const auto actual=(std::uint32_t(image.rgba[pixel])<<16)|(std::uint32_t(image.rgba[pixel+1])<<8)|std::uint32_t(image.rgba[pixel+2]);
+        cube_matches&=actual==((colors[face]^(mip?0x00FFFFFFU:0))&0x00FFFFFFU);
+    }
+    expect("all cubemap faces and mips preserve Xbox 128-byte face alignment",cube_matches);
     const auto errors=renderer.errors();expect("D3D11 validation clean",errors.empty());
     const bool passed=std::ranges::all_of(cases,[](const auto& item) {return item.second;});
     std::ostringstream output;output<<std::format("{{\"format\":\"smbd-texture-cache-v1\",\"adapter\":{},\"passed\":{},\"reload_cycles\":64,\"resident_texture_bytes\":{},\"cases\":[",

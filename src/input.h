@@ -57,6 +57,8 @@ private:
     bool capture_keyboard_=false;
     bool capture_all_=false;
     std::array<SDL_Gamepad*,4> devices_{};
+    struct Rumble {std::uint16_t low=0,high=0;std::uint64_t renew=0;};
+    std::array<Rumble,4> rumble_{};
     std::array<GamepadState,4> states_{};
     std::uint64_t updated_=0;
     std::uint32_t device_id_=0;

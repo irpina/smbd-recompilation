@@ -3,6 +3,7 @@
 #include "frame_step.h"
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <functional>
 #include <iomanip>
@@ -33,6 +34,29 @@ std::string probe_cpu(Xbe& image,const std::filesystem::path& capture,const std:
     if(heap_begin>=storage.size()) throw std::runtime_error("CPU snapshot has no heap range");
     memory.map(0x80000000U+heap_begin,std::span(storage).subspan(heap_begin));
     memory.map(0xF0000000U+heap_begin,std::span(storage).subspan(heap_begin));
+    struct VirtualSnapshot {std::uint32_t base;std::vector<std::byte> original,bytes;};
+    std::vector<VirtualSnapshot> virtual_ranges;std::uint64_t virtual_bytes=0;
+    std::string virtual_hash;
+    if(std::filesystem::exists(capture/"virtual-memory.bin")) {
+        File virtual_file(capture/"virtual-memory.bin");
+        if(virtual_file.size()<16 || virtual_file.size()>64*1024*1024+16384*8+16)
+            throw std::runtime_error("Virtual snapshot exceeds its physical-memory bound");
+        const auto magic=virtual_file.read(0,8);
+        if(std::memcmp(magic.data(),"SMBDVM1\n",8)) throw std::runtime_error("Invalid virtual snapshot header");
+        std::uint64_t offset=8;
+        for(;;) {
+            const auto header=virtual_file.read(offset,8);offset+=8;
+            const auto base=u32(header,0),size=u32(header,4);
+            if(!base && !size) {if(offset!=virtual_file.size()) throw std::runtime_error("Trailing virtual snapshot bytes");break;}
+            if(base<storage.size() || (base&4095) || !size || (size&4095) || std::uint64_t(base)+size>0x7FFF0000 ||
+                virtual_bytes+size>64*1024*1024 || virtual_ranges.size()>=16384)
+                throw std::runtime_error("Invalid virtual snapshot range");
+            auto bytes=virtual_file.read(offset,size);offset+=size;virtual_bytes+=size;
+            virtual_ranges.push_back({base,bytes,std::move(bytes)});
+            auto& range=virtual_ranges.back();memory.map_dynamic(base,range.bytes);
+        }
+        virtual_hash=hash(virtual_file,0,virtual_file.size());
+    }
     const auto recipe_bytes=commands.read(0,static_cast<std::size_t>(commands.size()));
     std::istringstream lines(std::string(reinterpret_cast<const char*>(recipe_bytes.data()),recipe_bytes.size()));
     const auto number=[](std::string text) {
@@ -43,7 +67,13 @@ std::string probe_cpu(Xbe& image,const std::filesystem::path& capture,const std:
             throw std::runtime_error("Invalid CPU probe word: "+text);
         return value;
     };
-    Cpu cpu;std::ostringstream records;std::string error,line;
+    auto started=std::chrono::steady_clock::now();
+    GuestClock clock{&started,[](void* context) {
+        const auto ns=std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now()-*static_cast<std::chrono::steady_clock::time_point*>(context)).count());
+        return (ns/1000000000)*733333333+(ns%1000000000)*733333333/1000000000;
+    }};
+    Cpu cpu;cpu.clock=&clock;std::ostringstream records;std::string error,line;
     std::uint64_t budget=0;unsigned line_number=0,calls=0,read_bytes=0,loaded_bytes=0,records_count=0;
     const auto record=[&](const std::string& text) {if(records_count++) records<<',';records<<text;};
     try {
@@ -52,7 +82,11 @@ std::string probe_cpu(Xbe& image,const std::filesystem::path& capture,const std:
             std::istringstream words(line);std::string command;words>>command;
             if(command.empty() || command.starts_with('#')) continue;
             const auto next=[&] {std::string text;if(!(words>>text)) throw std::runtime_error("Missing CPU probe operand");return number(text);};
-            if(command=="reset") {std::memcpy(storage.data(),original.data(),storage.size());cpu=Cpu{};frame_step={};}
+            if(command=="reset") {
+                std::memcpy(storage.data(),original.data(),storage.size());
+                for(auto& range:virtual_ranges) std::memcpy(range.bytes.data(),range.original.data(),range.bytes.size());
+                cpu=Cpu{};cpu.clock=&clock;frame_step={};
+            }
             else if(command=="step") {
                 const auto delta=std::bit_cast<float>(next()),phase=std::bit_cast<float>(next());const auto logic=next();
                 if(!std::isfinite(delta) || delta<=0 || delta>2 || !std::isfinite(phase) || phase<0 || phase>=1 || logic>1)
@@ -67,6 +101,7 @@ std::string probe_cpu(Xbe& image,const std::filesystem::path& capture,const std:
                 else if(name=="flags") cpu.flags=value;
                 else if(name=="fs_base") cpu.fs_base=value;
                 else if(name=="gs_base") cpu.gs_base=value;
+                else if(name=="ultrawide" && value<=1) cpu.ultrawide=value!=0;
                 else throw std::runtime_error("Unknown CPU probe register");
             } else if(command=="xmm") {
                 const auto index=next();if(index>=8) throw std::runtime_error("Invalid CPU probe XMM index");
@@ -112,8 +147,8 @@ std::string probe_cpu(Xbe& image,const std::filesystem::path& capture,const std:
             std::string extra;if(words>>extra) throw std::runtime_error("Unexpected CPU probe operand");
         }
     } catch(const std::exception& failure) {error=failure.what();cpu.diagnostic=nullptr;}
-    return std::format("{{\"format\":\"smbd-cpu-probe-v1\",\"passed\":{},\"source_sha256\":{},\"snapshot_sha256\":{},\"recipe_sha256\":{},\"calls\":{},\"loaded_bytes\":{},\"line\":{},\"error\":{},\"eip\":{},\"records\":[{}]}}",
-        error.empty(),json(image.sha256),json(hash(snapshot,0,snapshot.size())),json(hash(commands,0,commands.size())),calls,loaded_bytes,line_number,json(error),json(hex32(cpu.eip)),records.str());
+    return std::format("{{\"format\":\"smbd-cpu-probe-v1\",\"passed\":{},\"source_sha256\":{},\"snapshot_sha256\":{},\"virtual_snapshot_sha256\":{},\"virtual_snapshot_bytes\":{},\"recipe_sha256\":{},\"calls\":{},\"loaded_bytes\":{},\"line\":{},\"error\":{},\"eip\":{},\"records\":[{}]}}",
+        error.empty(),json(image.sha256),json(hash(snapshot,0,snapshot.size())),json(virtual_hash),virtual_bytes,json(hash(commands,0,commands.size())),calls,loaded_bytes,line_number,json(error),json(hex32(cpu.eip)),records.str());
 }
 std::string check_cpu(Xbe& image) {
     if (!image.supported()) throw std::runtime_error("CPU diagnostics require the supported executable");
@@ -228,8 +263,53 @@ std::string check_cpu(Xbe& image) {
         memory.store<std::uint8_t>(0x7289F8+3*0xD0+15,0xFF);
         auto cpu=run(0x73900,{0xFFFFFFFF},true);
         require(cpu.registers[eax]==0x7289F8+3*0xD0 && cpu.registers[ecx]==3 && cpu.registers[edx]==data+0x1003,"Sprite search lost its signed tag or register result");
+        cpu.flags=0x202|arithmetic_flags;cpu.registers[esp]=stack;
+        memory.store<std::uint32_t>(stack,sentinel);memory.store<std::uint32_t>(stack+4,0xFFFFFFFF);
+        invoke_native(cpu,memory,0x73900);
+        require(cpu.flags==0x246,"Sprite search must retain the original successful CMP flags");
         cpu=run(0x73900,{128},true);
         require(cpu.registers[eax]==0 && cpu.registers[ecx]==80 && cpu.registers[edx]==data+0x1050,"Sprite search exceeded its pool or matched an inactive entry");
+    });
+    check("original Baseball UI array callback publication and dispatch",0x00077080,[&] {
+        constexpr auto master=data+0x2000,flags=data+0x1000;
+        std::memset(memory.access(master,0x500),0,0x500);
+        std::memset(memory.access(flags,80),0,80);
+        memory.store<std::uint32_t>(0x6C93A8,80);memory.store<std::uint32_t>(0x6C93AC,0);
+        memory.store<std::uint32_t>(0x6C93B0,0);memory.store<std::uint32_t>(0x6C93B4,flags);
+        memory.store<std::uint32_t>(0x7700A4,master);
+        const auto reach=[&](std::uint32_t entry,std::uint32_t stop,std::uint32_t row=0) {
+            Cpu cpu;ExecutionDiagnostic diagnostic;diagnostic.remaining=10000;diagnostic.break_address=stop;
+            cpu.diagnostic=&diagnostic;cpu.registers[esp]=stack;cpu.registers[esi]=row;
+            memory.store<std::uint32_t>(stack,sentinel);
+            bool reached=false;
+            try {invoke_native(cpu,memory,entry);}
+            catch(const NativeBoundary& boundary) {
+                reached=boundary.address==stop && cpu.eip==stop &&
+                    std::string_view(boundary.what()).find("execution diagnostic breakpoint reached")!=std::string_view::npos;
+                if(!reached) throw;
+            }
+            require(reached,"Original Baseball path did not reach the requested boundary");cpu.diagnostic=nullptr;return cpu;
+        };
+        // Execute the real builder until immediately after all three stores.
+        reach(0x000F3E40,0x000F3B50);
+        for(unsigned index=1;index<=3;++index) {
+            const auto row=memory.load<std::uint32_t>(master+0x338+(50+index)*4);
+            require(row==0x7289F8+index*0xD0 && memory.load<std::uint32_t>(row+0x38)==0xF3AA0,
+                "Original Baseball builder published a different UI callback");
+            const auto cpu=reach(0x00077080,0x000F3AA0,row);
+            require(memory.load<std::uint32_t>(cpu.registers[esp])==0x770DD &&
+                memory.load<std::uint32_t>(cpu.registers[esp]+4)==row,
+                "Baseball callback lost its row argument or draw-loop return address");
+        }
+        const auto row=memory.load<std::uint32_t>(master+0x338+51*4);
+        memory.store<std::uint32_t>(row+0x38,0x73900);
+        bool rejected=false;
+        try {reach(0x00077080,0x00073900,row);}
+        catch(const NativeBoundary& boundary) {
+            rejected=std::string_view(boundary.what()).find("call target is outside its verified table")!=std::string_view::npos;
+            if(!rejected) throw;
+        }
+        require(rejected,"UI dispatch admitted an unrelated compiled function");
     });
     check("original main-game force integration at 30..1000 Hz",0x0008FE80,[&] {
         struct Restore {FrameStep saved=frame_step;~Restore(){frame_step=saved;}} restore;
@@ -379,6 +459,23 @@ std::string check_cpu(Xbe& image) {
             for(unsigned frame=0;frame<rate*2;++frame) value+=(1-value)*gain;
             require(std::abs(value-(1-std::pow(0.98,120)))<0.000001,"Damping depends on refresh rate");
         }
+    });
+    check("original REP MOVS across RAM aliases",0x0030D820,[&] {
+        memory.map(0x80000000U+data,{static_cast<std::byte*>(memory.access(data,256)),256});
+        memory.map(0xF0000000U+data,{static_cast<std::byte*>(memory.access(data,256)),256});
+        constexpr std::uint32_t first=0x03020100;
+        for(const auto aliases:{std::array{0x80000000U,0U},std::array{0U,0x80000000U},std::array{0x80000000U,0xF0000000U}}) {
+            for(unsigned i=0;i<17;++i) memory.store<std::uint32_t>(data+i*4,first+i);
+            const auto destination=(data+4)|aliases[0],source=data|aliases[1];
+            const auto cpu=run(0x0030D820,{destination,source,64},true);
+            require(cpu.registers[eax]==destination,"Original memmove changed its returned guest address");
+            for(unsigned i=0;i<17;++i) require(memory.load<std::uint32_t>(data+i*4)==first,
+                "Aliased REP MOVSD lost its forward write dependencies");
+        }
+        for(unsigned i=0;i<17;++i) memory.store<std::uint32_t>(data+i*4,first+i);
+        memory.move_elements<std::uint32_t>(data+60,0xF0000000U+data+64,16,true);
+        for(unsigned i=0;i<17;++i) require(memory.load<std::uint32_t>(data+i*4)==first+16,
+            "Aliased reverse REP MOVSD lost its backward write dependencies");
     });
     check("host RAM bounds and address aliases",0,[&] {
         std::array<std::byte,64> bytes{};

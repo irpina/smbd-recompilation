@@ -1,0 +1,107 @@
+Monkey Baseball settings allocation failure, 2026-11-02
+
+Original executable and supplied evidence
+  XBE SHA256 9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2
+  Native verify-disc matched the executable in the original 2,953,707,520-byte
+  XISO to this supported hash: build/logs/baseball-disc.json.
+  User report: build/logs/game-stopped-1793638041760.json.
+  Build Nov 2 2026 10:30:15. Active thread 8, original function 0031AD80.
+  Boundary: Guest memory access at 0xFFFFFFFF, 4 bytes, outside the mapped regions.
+  Session: build/windows/Release/logs/smbd-20261102-164121-9852.log.
+
+  At tick 20648, the heap's 4 MiB MEM_RESERVE request at original 00306F03
+  failed with STATUS_NO_MEMORY. At tick 21060, original VirtualAlloc's call
+  returning at 00305F80 failed for 1,406,976 bytes with flags 00801000
+  (MEM_COMMIT | Xbox MEM_NOZERO), protection 4. The largest unallocated range
+  was 700,416 bytes, although more than 13 MiB of physical memory was unused.
+  The final report also contains 9,441,280 uncommitted reserved bytes.
+  Calculations from the actual allocation inventory: baseball-memory-evidence.json.
+
+  Mode history records leaving Bowling mode 172, returning through party menus,
+  choosing party selection 10 and entering menu 82 just before the failure.
+  The invalid resource pointer reaches 00032410 from 000252DD. That routine calls
+  the original texture-description entry at 0031F500, which reaches 003218B0 and
+  0031AD80. Original 0031AD84 reads the resource's first word; its stack argument
+  is FFFFFFFF. Suppressing this read or substituting an empty texture would hide
+  the failed allocation rather than restore the original game's behavior.
+  Bounded original instruction evidence is saved in baseball-texture-caller.json,
+  baseball-texture-loader.json and baseball-create-resource.json under build/logs.
+  baseball-resource-loader.json started at a non-entry address and is not used as
+  instruction evidence; the indexed entry 000251A0 was subsequently analyzed.
+
+Root cause
+  NtAllocateVirtualMemory used the contiguous physical allocation pool. Reserving
+  an address range therefore occupied that same scarce pool, and committing new
+  ordinary virtual memory required a single physical-address hole large enough
+  for the whole allocation. Decommit left the reservation blocking that pool.
+  A longer session with minigame changes exposed the resulting false exhaustion.
+
+Correction
+  Pageable reservations use valid addresses in the remaining Xbox user address
+  space, above the bridge's existing direct RAM window and below 7FFF0000.
+  Native VirtualAlloc/VirtualFree provide backing on commit/decommit/release.
+  Only committed pages consume the shared 64 MiB guest physical-memory budget.
+  Physical/system/cache allocations retain their bounded contiguous RAM pool.
+  Reservations do not consume that pool or physical commitment. Failed requests
+  still return real failure, including commitment beyond the guest memory budget.
+
+  Committed virtual ranges map to their native backing through Memory's bounded
+  mapping table. Adjacent spans from the same native reservation join, so native
+  bulk reads/copies remain contiguous across successive page commitments.
+  Decommit removes the readable mapping and releases backing; recommit restores
+  zeroed pages without changing neighboring committed bytes. Query and protection
+  metadata retain virtual address high bits, distinct from physical aliases.
+  GPU cache invalidation is retained for representable released/decommitted ranges.
+  Failure reports now distinguish available physical bytes from address holes.
+
+  F8 captures stream committed pageable bytes to bounded virtual-memory.bin,
+  alongside the existing guest-memory.bin. CPU probes restore both and include
+  their hashes. This preserves diagnostics when the process heap lies outside
+  the direct RAM window. No runtime guest instruction decoding was introduced.
+
+  Native pageable backing has no exposed guest physical page identity. An actual
+  MmGetPhysicalAddress request for such backing stops explicitly rather than
+  returning a false masked address. The supplied full session has zero calls to
+  that export; the game's contiguous GPU allocations retain their physical aliases.
+
+Independent references
+  https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntallocatevirtualmemory
+    Reserve versus commit, operating-system-selected addresses, page rounding,
+    and failure semantics.
+  https://raw.githubusercontent.com/Cxbx-Reloaded/Cxbx-Reloaded/master/src/common/AddressRanges.h
+    Independently implemented Xbox user range 00010000..7FFEFFFF, allocation
+    granularity 64 KiB and separate contiguous/system regions.
+  https://raw.githubusercontent.com/Cxbx-Reloaded/Cxbx-Reloaded/master/src/core/kernel/memory-manager/VMManager.cpp
+    Independent user reservations and physical commitment accounting.
+  https://xboxdevwiki.net/Memory
+    Physical RAM and its aliases; a physical map alone does not describe the
+    operating system's entire virtual address space.
+
+Validation, Windows x64 / NVIDIA GeForce RTX 5060 Ti
+  Before: native service diagnostic failed on reserving 64 MiB without physical
+  commitment. build/logs/baseball-baseline.json records the actual failure.
+  After: all 196 service checks pass. Added checks reserve without commitment,
+  fragment physical memory, invoke original VirtualAlloc 00305F67 for the exact
+  Baseball request, access its full range, decommit/recommit without corrupting
+  adjacent bytes, reject genuine overcommit, retain high virtual bits, and return
+  to the original allocation count and available-memory budget after cleanup.
+  Original CPU diagnostics: 21 cases, 10,628 compiled functions, passed.
+  Offline audio: 37; timing: passed; texture/cache: 19; image copies: 20;
+  Bowling partial-copy fixture at 3x/MSAA 4x: 14; all passed.
+  Existing 370-draw capture replay at MSAA 4x/AF 16x: zero changed RGB pixels and
+  no D3D11 errors. Prior Bowling fixes and source edits are retained.
+
+  Hidden, muted fresh-storage boot reached Mode Select and ended normally after
+  1,000 frames; its eight input steps and two waits completed. An earlier route
+  stopped at the fresh-storage confirmation dialog, with its input incomplete.
+  Neither run reached Baseball settings; they are not claimed as Baseball tests.
+  Snapshot round trip restored 14,086,144 pageable bytes, read the process heap
+  at 04000000, changed it in the probe and verified reset restored original bytes.
+  Both native executables rebuilt with one compiler/linker worker, including all
+  shared-header CPU shards. git diff --check passes.
+  The user requested manual gameplay testing; further game sessions were stopped.
+  End-to-end Bowling-to-Baseball settings verification remains with that manual test.
+
+  Final results: build/logs/baseball-validation.json.
+  The focused checks do not establish original-Xbox visual parity, performance
+  acceptance, all possible virtual-memory exports or Linux/macOS hardware behavior.

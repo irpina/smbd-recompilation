@@ -58,7 +58,7 @@ const std::vector<DiscEntry>& Disc::directory(const DiscEntry& entry) {
             std::string(reinterpret_cast<const char*>(table.data() + offset + 14), name_size),
             u32(table, offset + 4), u32(table, offset + 8),
             std::to_integer<std::uint8_t>(table[offset + 12])};
-        if (child.name == "." || child.name == ".." || child.name.find_first_of("/\\\0", 0, 3) != std::string::npos)
+        if (child.name == "." || child.name == ".." || child.name.find_first_of("/\\:\0", 0, 4) != std::string::npos)
             throw std::runtime_error("Invalid directory filename");
         file_.check(child.sector * sector_size, child.size);
         entries.push_back(std::move(child));

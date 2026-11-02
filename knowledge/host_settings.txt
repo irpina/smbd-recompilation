@@ -114,15 +114,15 @@ verified as 3FE38E39/44555555, changed only in RAM to 21/9 and 1120. Indexed
 readers are ADCCC, ADD83 and 1E6A95 for aspect, ADCBC and 1E6A85 for width.
 ADCA0 updates canvas 73F198 and aspect 73F0EC; ADD70 updates the five camera
 aspect fields at 73F1D4 + 28C*i. The original projection calculations remain.
-Initial 21:9 capture confirmed those fields but exposed stretched UI/previews.
-Projection setter 31540 explicitly separates perspective mode 0 (W=-Z) and
-orthographic mode 1 (W=1). Only mode 1's X-scale/offset stores 31563/3157B
-gain the 16/21 adjustment when the native ultrawide option is active. Both
-instruction signatures are checked during recompilation. SSE status is saved
-and restored around that setting adjustment; 4:3/16:9 keep original stores.
-This changes the original shared projection used by CPU/GPU calculations,
-not a post-process stretch or a shader-specific guess. Window diagnostics
-record active/requested aspect modes independently of pending preferences.
+The original 31540 projection stores now remain intact. The earlier blanket
+16/21 orthographic adjustment left the HUD within a narrower layout and made
+minimap markers disagree with the separately projected map. The 2026-11-02 fix
+extends the original UI canvas records and applies 4/7 horizontal scaling at
+the game's HUD anchors. The minimap retains its local 16:9 projection and maps
+its viewports, clipping and markers together against the screen's right edge.
+See knowledge/ultrawide_hud.txt for executable addresses and native checks.
+Window diagnostics record active/requested aspect modes independently of
+pending preferences.
 
 Final Windows checks: ultrawide-final-frame replays all 782 draws with zero RGB
 differences and no D3D11 errors. standard-4x-final captures native 4:3 movie

@@ -1,0 +1,60 @@
+Minimap depth-mask seam (2026-11-02)
+
+Verified USA XBE SHA-256:
+9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2
+Capture: frame-1793656650204-77247929600,485 draws,3x/MSAA4,21:9.
+XISO verification: build/logs/minimap-seam-disc.json.
+
+The line is at the map viewport's left edge, guest x518. Draw306 first clears
+depth near the camera over the map rectangle; draws307..309 open its circular
+aperture at far depth. Stage draws312..403 then pass only inside that opening.
+Stencil testing is disabled: this mask uses depth, not a stencil or texture.
+Draw404 restores depth afterwards. Both rectangle draws use original148290.
+
+The first rectangle starts roughly half a pixel inside its viewport boundary.
+At enhanced resolution/MSAA, uncovered samples retain the world depth and allow
+a vertical sliver of map geometry through. The same old pixel-centre convention
+predates the recent ultrawide changes. Native reproduction matches both captured
+rectangle vertex payloads exactly before the correction.
+
+src/recompiler.cpp corrects the shared rectangle setup at1482AE, after the five
+input floats have been copied into private stack/register storage. It converts
+the legacy pixel-centre rectangle to pixel edges and rounds outward by1/16 pixel.
+Camera-space deltas use the actual projection and SDK viewport dimensions:
+  dx = 2*w/(projection_x*viewport_width)
+  dy = 2*w/(projection_y*viewport_height)
+Here w=-z for perspective and1 for orthographic projection. Pixel-centre shifts
+and outward margins follow each edge's direction. Zero-area/unprojectable
+rectangles remain unchanged; caller input arrays and depth values are preserved.
+The original viewport setter31E240 stores width/height at device+EE8/EEC.
+Bounded analysis and the six original call references are in build/logs/
+minimap-seam-original, minimap-seam-viewport-sdk.json and
+minimap-seam-helper-references.json. No global camera/raster offset is changed.
+
+Native before/after execution of58AC0 emits99 draws. Only XY words of the two
+rectangle quads change; circular geometry, map geometry, projection constants
+and depth values remain identical. Derived replay replaces just those two
+48-byte vertex files; the original capture and all trace records are untouched.
+
+Validation on NVIDIA GeForce RTX5060Ti:
+- Full485-draw replay: zero D3D11 errors. The marked strip previously contained
+  470 differing pixels versus the world-only frame; the corrected strip matches
+  the world-only frame exactly. Preview:
+  build/checks/minimap-seam/corrected/frame.png.
+- Controlled depth-clear fixture: the original quad leaks1152 pixels at3x/MSAA4.
+  Corrected coverage passes all16 combinations of scales1..4 and AA off/MSAA2/4/8:
+  all36864000 checked pixels match, with zero D3D11 errors. One target is used
+  and all GPU runs are sequential to bound memory use.
+- Seven native rectangle cases cover near/far perspective, orthographic,
+  reversed bounds and zero width/height. Caller arrays and Z remain unchanged.
+- Both release executables rebuilt,10629 compiled functions,zero unresolved
+  calls. CPU checks22 and git diff --check pass. No gameplay session launched.
+
+Artifacts: build/logs/minimap-seam-validation.json and build/checks/minimap-seam.
+Full-frame replay comparisons also record a few varying character pixels away
+from the map, including variation between two identical-input baseline runs;
+see minimap-seam-replay-variation.json. No unrelated correction is claimed.
+These are offscreen correctness checks, not Xbox-parity or performance claims.
+
+Independent pixel/sample coverage rules:
+https://learn.microsoft.com/en-us/windows/win32/direct3d11/d3d10-graphics-programming-guide-rasterizer-stage-rules

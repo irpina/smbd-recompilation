@@ -1,0 +1,104 @@
+Monkey Bowling podium image-copy failure, 2026-11-02
+
+Verified original executable
+  SHA256 9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2
+  data/local/default.xbe, 7,143,424 bytes
+  Original XISO: Super Monkey Ball Deluxe (USA).xiso.iso, 2,953,707,520 bytes.
+  Native verify-disc matched its embedded executable to this supported hash.
+  Result: build/logs/bowling-podium-disc.json.
+
+Observed failure
+  User log: C:/Users/Timmy/Desktop/smbd-20261102-052502-7660.log
+  Native boundary: Initial image blit must define complete rows from the origin
+  Guest EIP 00320990, frame 21379, 23,165,925 draws.
+  Rich report: build/logs/game-stopped-1793597466537.json.
+  No allocation failures; this was a native image-copy restriction, not an
+  exhausted guest heap. User settings were 3x resolution, AA quality 5 (MSAA 4x),
+  AF 16x and widescreen.
+
+  Original stack includes 0002FE3A, 0002FF85, 0031E4E3, 0031ABF2 and 00320D34.
+  Bounded native analysis of verified instruction boundaries shows 0002FE35
+  calling the SDK texture-binding function 0031E4A0; its call at 0031E4DE waits
+  for the old resource through 0031ABD0. Previously queued GPU work encounters
+  the restriction during that wait. The faulting CPU instruction is not itself
+  the faulty image-copy logic.
+
+  Register memory at ECX/EDI 01CAAE40 contains a texture resource header:
+    01040000 03225000 00014E11 00011229 271DB27F
+  Its data begins at 03225000, format is linear ARGB8, dimensions 640x476,
+  pitch 2560. These facts support the screenshot-texture path. The log does
+  not retain the exact NV09F rectangle coordinates; those are not reconstructed
+  by guessing. Analysis reports:
+    build/logs/bowling-podium-texture-selection.json (0002FE10, 160 instructions)
+    build/logs/bowling-podium-sdk-texture-bind.json (0031E4A0, 96 instructions)
+
+Root cause and correction
+  The bridge wrongly required the first NV09F source-copy into a new native
+  destination to fill complete rows from (0,0). NV062 supplies pitches and
+  offsets; NV09F supplies source/destination points and rectangle dimensions.
+  A valid rectangle need not cover a full pitched row or begin at the origin.
+
+  Materialize the required destination extent, initialize it from guest RAM,
+  and copy the requested native GPU rectangle. When texture binding, another
+  blit, or a new depth view reveals a larger extent, preserve the existing GPU
+  image and initialize only the newly exposed strips from RAM. Depth views share
+  the color image. Linear RGB565 binding uses the verified NV097 format 0x11.
+
+  Initialization is an AOT point-sampled native pass so scaled and MSAA surfaces
+  receive the correct pixels and alpha, without gameplay GPU readback. Temporary
+  upload storage is bounded by the existing image dimension limits. Uploads occur
+  on materialization/growth, not on every draw. Capture/replay records these RAM
+  initialization writes in their original order.
+
+  Growing a sampled texture can flush queued draws. Resolve the texture state
+  before reserving the next draw slot so that flush cannot leave the next draw
+  in a discarded slot. The diagnostic checks two different queued draw counts
+  and the following draw's actual texture handle across this flush.
+
+  The error-screen loop also wrongly tried to display an active auxiliary target,
+  producing the second error in the supplied log. It now displays the last
+  published frame, with a cleared main image as the pre-publication fallback.
+
+Independent contract references, consulted 2026-11-02
+  https://github.com/xemu-project/xemu/blob/master/hw/xbox/nv2a/pgraph/vk/blit.c
+    Source/destination offsets include each point's x/y and pitch; SRCCOPY
+    processes just the requested row bytes. Surrounding destination bytes survive.
+  https://raw.githubusercontent.com/xemu-project/xemu/master/hw/xbox/nv2a/nv2a_regs.h
+    NV062 formats, NV09F point/size methods, NV097 linear RGB565 format 0x11.
+    Local excerpt source: build/logs/bowling-podium-nv2a-regs.h.
+  https://learn.microsoft.com/en-us/windows/win32/api/d3d11/nf-d3d11-id3d11devicecontext-copysubresourceregion
+    D3D11 allows offset rectangles within resource extents. Its multisample
+    restrictions require the existing native shader copy path for partial copies.
+
+Validation on NVIDIA GeForce RTX 5060 Ti / Windows x64
+  Both native executables rebuilt with clang-cl/LLD and one worker, using the
+  existing verified generated code and offline shader bank.
+  Before: the new native NV062/NV09F packet fixture reproduces the exact boundary.
+    build/logs/bowling-podium-before.json
+  After: 14 cases at native resolution and 14 at 3x/MSAA 4x pass. Both ARGB8 and
+  RGB565 verify first offset copy, unchanged RAM/alpha outside it, texture extent,
+  queued draw ordering, later blit growth, shared depth-view growth and clean
+  D3D11 validation. Independent expected pixels are checked across the full image.
+    build/logs/bowling-podium-complete-native.json
+    build/logs/bowling-podium-complete-3x-msaa4.json
+  Synthetic initialization/copy/growth capture replay: zero changed RGB pixels,
+  no D3D11 errors. It uses an independently checked fixture image and an original
+  captured draw with color writes disabled; it is not an original-game reference.
+    build/logs/bowling-podium-complete-replay.json
+  Existing 370-draw capture replay: zero changed RGB pixels, MSAA 4x / AF 16x,
+  no D3D11 errors.
+    build/logs/bowling-podium-complete-existing-replay.json
+  Presentation: 430 checks, including displaying published frames while an
+  auxiliary target is active, source/window sizes, aspect ratios and live game
+  setting changes. Image copying: 20 cases. Texture/cache: 19 cases.
+  Hidden, muted fresh-storage Story run at 3x/MSAA 4x/AF 16x: exit 0, 3,080 frames,
+  919,009 draws, all 27 input steps and four waits complete, final PNG saved.
+    build/logs/bowling-podium-story-stdout.txt
+    build/logs/bowling-podium-story.png
+  git diff --check passes. All third-audit source fingerprints remain identical
+  except the seven files changed for this fix. Existing audit edits are retained.
+  Final aggregate: build/logs/bowling-podium-validation.json.
+
+  A complete Bowling match and the podium transition were not replayed end to end.
+  The focused fixture proves the rejected command family and its native image
+  lifetime; it does not establish original-Xbox visual parity or performance goals.

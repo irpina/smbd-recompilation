@@ -127,6 +127,9 @@ std::string check_presentation(const std::filesystem::path& directory,const std:
         renderer.resize(40,30);require(!renderer.display(true));
         renderer.clear(0xFF204060);renderer.publish_frame();require(renderer.display(true));renderer.present(false);
         require(renderer.errors().empty());
+        require(SDL_SetWindowSize(window.get(),5120,72));SDL_PumpEvents();
+        require(renderer.display(true));const auto wide=renderer.read_display();renderer.present(false);
+        require(wide.width==5120 && wide.height==72 && renderer.errors().empty());
         require(SDL_SetWindowSize(window.get(),96,72));SDL_PumpEvents();
     }
     unsigned live_changes=0;
@@ -347,7 +350,14 @@ void SettingsUi::draw(bool playing,bool recording,double fps,const std::function
         ImGui::Begin("Super Monkey Ball Deluxe settings",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings);
         wooden_panel(wood_.Get(),false);ImGui::PushStyleVar(ImGuiStyleVar_DisabledAlpha,1.0f);
         ImGui::BeginDisabled(!show || animation_<1);ImGui::PopStyleVar();
-        if(icon_) ImGui::Image(reinterpret_cast<ImTextureID>(icon_.Get()),{48*icon_aspect_,48});
+        if(icon_) {
+            constexpr float icon_height=48;
+            ImGui::Image(reinterpret_cast<ImTextureID>(icon_.Get()),{icon_height*icon_aspect_,icon_height});ImGui::SameLine();
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY()+(icon_height-ImGui::GetTextLineHeight())/2);
+        }
+        constexpr const char* save_hint="Changes save automatically";
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(save_hint).x));
+        ImGui::TextDisabled("%s",save_hint);
         ImGui::Separator();
         constexpr const char* pages[]={"Game Files","General","Audio","Graphics","Enhancements","Controls","Diagnostics"};
         const auto content=ImGui::GetContentRegionAvail();
@@ -498,7 +508,7 @@ void SettingsUi::draw(bool playing,bool recording,double fps,const std::function
         ImGui::PopStyleColor(4);ImGui::SameLine();
         if(playing) {if(ImGui::Button("Restart game",{170,0})) restart=true;ImGui::SameLine();}
         if(ImGui::Button("Restore defaults",{170,0})) {settings_=Settings(settings_.root);files_message_.clear();binding_action_=-1;changed=true;message("Default settings restored.");}
-        ImGui::SameLine();ImGui::TextDisabled("Saved automatically");
+        ImGui::SameLine();if(ImGui::Button("Exit game",{170,0})) quit=true;
         ImGui::EndDisabled();ImGui::End();
     }
     if(settings_.show_fps || recording) {

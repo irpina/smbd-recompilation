@@ -1,0 +1,69 @@
+Ultrawide HUD and minimap layout (2026-11-02)
+
+Verified USA XBE SHA-256:
+9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2
+build/logs/ultrawide-hud-disc.json verifies the executable against the XISO.
+Capture: frame-1793645952652-259834322600, 594 draws, 3x/MSAA4, 21:9.
+
+Cause: the extension multiplied all orthographic X scales/offsets by 16/21,
+including already anchored HUD sprites, but changed the minimap's separate
+perspective camera to 21:9 without mapping its fixed pixel viewport. Its 3D
+frame, stage view and deferred 2D markers consequently used different spaces.
+The original UI canvas records also retained their 16:9 widths and safe bounds.
+
+Corrections in src/recompiler.cpp and src/xbox.cpp:
+- Remove the blanket projection adjustment at 31563/3157B. Keep the original
+  projection setter, including ordinary full-screen pixel-coordinate copies.
+- Use 4/7 instead of the native 3/4 at the five widescreen HUD scale calls:
+  74EC6, 3D707, 3DBA7, 3DE9D, 3E286. Preserve the native anchor positions.
+- Extend the three widescreen UI records at 4B62C0, 4B62E8 and 4B6310:
+  width/canvas/right safe edge/centre. Full-height records become 1120x480;
+  the shorter record becomes 840x360 with a 1120-wide logical canvas.
+  Validate original fields at construction; restore them on live aspect changes.
+- Original minimap producer 58AC0 obtains its local aspect through ADDC0 at
+  58BDF, 58D3A, 58D55, 58F5B and 58F80. These five reads retain 16:9 locally;
+  the global 21:9 camera value is restored immediately after each leaf call.
+- Map its three viewport calls (58C3A, 58F1C, 59636), matching scissor calls
+  (58C52, 58F2D, 5964C), and marker calls (59350, 594FA) together:
+      x' = 640 + (x - 640) * 16/21
+  Viewport widths scale likewise; round their integral SDK bounds before use.
+  B4B50 at the end of the original producer restores the main viewport/camera.
+- Deferred markers retain the mapped position and native anchor flag/word.
+  Arrow sprite 500/flags2000A already contains the native artwork correction.
+  Its native anchor matrix applies only the additional 16/21 scale, after its
+  rotation; scaling its local X extent would distort rotated arrows. The
+  verified 7550A call and 74E70 saved-ESI layout identify that sprite path.
+  Ordinary character markers use the regular 4/7 HUD correction.
+All modified call targets/lengths are verified during AOT generation.
+
+Evidence and checks (NVIDIA GeForce RTX 5060 Ti):
+- Bounded original analysis: build/logs/ultrawide-minimap-original and the
+  ultrawide-hud-stage*/ultrawide-layout-original reports. UI table bytes are
+  recorded in ultrawide-layout-data.json. No whole-binary disassembly was used.
+- Native CPU probes execute 58AC0 and 6A1E0 from the capture's RAM and pageable
+  snapshot. The diagnostic uses the captured push-buffer allocation with ample
+  free space, an ended worker's guest stack, and a real monotonic timestamp
+  clock. No graphics API is stubbed. The probe supports the CPU ultrawide flag.
+- The SDK's device cursor includes EndPush; the inline writer cursor does not.
+  Parse through device slot32B6B0: 60160 bytes, 248 native map/HUD draws.
+- Native marker descriptor: x597.3333/y392, integer anchor597. Native emitted
+  quad starts at x578.87177/y380. The marker is inside the mapped stage view.
+- Nine native anchor cases pass: pivots96/320/544 at 4:3, 16:9 and 21:9.
+  Three native arrow comparisons at 0/45/90 degrees preserve Y and the complete
+  rotated shape; maximum X residual0.124711 guest pixel is the integer anchor
+  rounding inherited from the original ABI.
+- Both release executables rebuilt: 10629 functions, zero unresolved calls.
+  CPU checks22 and native service checks196 pass; git diff --check passes.
+
+Replay: build/checks/ultrawide-hud/final-corrected/frame.png, all594 draws,
+zero D3D11 errors. Original capture is untouched. Draws0..345 retain captured
+world data. Of248 map/HUD draws,244 use the native probe's position/projection
+data; four animated HUD sprites retain captured vertices with the independently
+checked anchor matrix because request-time CPU state precedes the GPU frame.
+The final build's native geometry/constants match that preview's probe output.
+Aggregate: build/logs/ultrawide-hud-validation.json. This is offscreen layout
+validation, not a new gameplay session or an original-Xbox visual-parity claim.
+
+Independent viewport/clip-coordinate rules:
+https://learn.microsoft.com/en-us/windows/win32/direct3d9/viewports-and-clipping
+https://learn.microsoft.com/en-us/windows/win32/direct3d9/d3dviewport9

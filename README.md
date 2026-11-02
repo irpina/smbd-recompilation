@@ -8,7 +8,7 @@
 
 An unofficial native version of the original Xbox game for Windows, built around accurate gameplay, the original presentation, and higher refresh rates.
 
-**0.1.0 is the first public development release.** Bugs, slowdowns, and stops in untested game modes are still possible. Linux and macOS are planned targets; the current game build requires Windows x64.
+**0.2.0 is the latest public development release.** Bugs, slowdowns, and stops in untested game modes are still possible. Linux and macOS are planned targets; the current game build requires Windows x64.
 
 This fan project is independent of SEGA. You must provide your own US Xbox game disc image. Original game files are not distributed here.
 
@@ -23,6 +23,19 @@ OpenAI Codex has assisted with development and research. Changes are checked usi
 | [<img src="resources/screenshots/mode-select.jpg" alt="Mode Select menu" width="260">](resources/screenshots/mode-select.jpg) | [<img src="resources/screenshots/stage-select.jpg" alt="World 3 Stage Select" width="260">](resources/screenshots/stage-select.jpg) | [<img src="resources/screenshots/gameplay.jpg" alt="AIAI on a stage" width="260">](resources/screenshots/gameplay.jpg) |
 
 ## Current status
+
+### Changes in 0.2.0
+
+- Fixed 15 correctness issues spanning a variety of systems. These fixes bring the recomp much closer to Xbox parity.
+- Fixed certain crashes while playing minigames.
+- Made adjustments to HUD elements in ultrawide mode.
+- Added an **Exit game** button to the Settings UI.
+
+### Known issues
+
+- Monkey Baseball crashes. A fix is planned for the next release.
+- Specific timing issues while playing at higher refresh rates.
+- Specific upscaling quirks.
 
 ### What works
 
@@ -50,7 +63,7 @@ OpenAI Codex has assisted with development and research. Changes are checked usi
 
 You need a Direct3D 11-capable graphics card and an XISO image of the **US Xbox release of Super Monkey Ball Deluxe**. A full raw-disc dump must first be converted to XISO. The executable is checked against [the supported-target registry](knowledge/supported_target.json).
 
-**[Download the 0.1.0 Windows installer](https://github.com/timftw21/smbd-recompilation/releases/download/v0.1.0/smbd-0.1.0-windows-x64-setup.exe)** · [Release notes and SHA-256 checksum](https://github.com/timftw21/smbd-recompilation/releases/tag/v0.1.0)
+**[Download the 0.2.0 Windows installer](https://github.com/timftw21/smbd-recompilation/releases/download/v0.2.0/smbd-0.2.0-windows-x64-setup.exe)** · [Release notes and SHA-256 checksum](https://github.com/timftw21/smbd-recompilation/releases/tag/v0.2.0)
 
 1. Run the installer and select your US Xbox XISO image.
 2. Choose an installation folder. You can keep a copy of the image with the game and create a desktop shortcut.
@@ -88,6 +101,8 @@ These remain development targets, not supported installation options. The intend
 ## Game settings
 
 Press **F1** or **Esc**, or the gamepad **Back** button, to open settings. Preferences save automatically.
+
+Use the bottom row to close settings, restart the running game, restore defaults, or **Exit game**.
 
 - **Game Files:** Select and validate the XISO and executable.
 - **General:** Choose a refresh limit or Unlimited, and toggle the frame-rate display. V-sync can impose an additional limit.

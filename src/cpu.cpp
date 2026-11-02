@@ -16,7 +16,47 @@ std::byte* Memory::mapped_pointer(std::uint32_t address,std::size_t size) const 
         const auto offset=static_cast<std::uint64_t>(address)-region.base;
         if(size<=region.bytes.size() && offset<=region.bytes.size()-size) return region.bytes.data()+offset;
     }
+    auto found=dynamic_regions_.upper_bound(address);
+    if(found!=dynamic_regions_.begin()) {
+        --found;const auto offset=std::uint64_t(address)-found->first;
+        if(size<=found->second.size() && offset<=found->second.size()-size) return found->second.data()+offset;
+    }
     return nullptr;
+}
+void Memory::map_dynamic(std::uint32_t base,std::span<std::byte> bytes) {
+    const auto end=std::uint64_t(base)+bytes.size();
+    if(bytes.empty() || end>0x100000000ULL || dynamic_regions_.size()>=32768)
+        throw std::runtime_error("Invalid or exhausted dynamic guest mappings");
+    const auto overlaps=[&](std::uint32_t other,std::size_t size) {return base<std::uint64_t(other)+size && other<end;};
+    if(overlaps(base_,bytes_.size())) throw std::runtime_error("Dynamic guest mapping overlaps RAM");
+    for(unsigned i=0;i<region_count_;++i) if(overlaps(regions_[i].base,regions_[i].bytes.size()))
+        throw std::runtime_error("Dynamic guest mapping overlaps a static mapping");
+    auto next=dynamic_regions_.lower_bound(base);
+    if(next!=dynamic_regions_.end() && next->first<end) throw std::runtime_error("Dynamic guest mappings overlap");
+    if(next!=dynamic_regions_.begin()) {
+        const auto previous=std::prev(next);
+        if(std::uint64_t(previous->first)+previous->second.size()>base) throw std::runtime_error("Dynamic guest mappings overlap");
+        if(std::uint64_t(previous->first)+previous->second.size()==base && previous->second.data()+previous->second.size()==bytes.data()) {
+            base=previous->first;bytes={previous->second.data(),previous->second.size()+bytes.size()};dynamic_regions_.erase(previous);
+        }
+    }
+    if(next!=dynamic_regions_.end() && end==next->first && bytes.data()+bytes.size()==next->second.data()) {
+        bytes={bytes.data(),bytes.size()+next->second.size()};dynamic_regions_.erase(next);
+    }
+    dynamic_regions_.emplace(base,bytes);
+}
+void Memory::unmap_dynamic(std::uint32_t base,std::uint32_t size) {
+    const auto end=std::uint64_t(base)+size;
+    auto found=dynamic_regions_.upper_bound(base);
+    if(found!=dynamic_regions_.begin()) --found;
+    while(found!=dynamic_regions_.end() && found->first<end) {
+        const auto start=found->first;const auto bytes=found->second;
+        const auto limit=std::uint64_t(start)+bytes.size();
+        if(limit<=base) {++found;continue;}
+        found=dynamic_regions_.erase(found);
+        if(start<base) dynamic_regions_.emplace(start,bytes.first(base-start));
+        if(limit>end) {dynamic_regions_.emplace(static_cast<std::uint32_t>(end),bytes.subspan(end-start));break;}
+    }
 }
 double frame_gain_double(FloatingState& state,double gain) {
     if(frame_step.delta==1) return gain;

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <format>
+#include <map>
 #include <span>
 #include <stdexcept>
 #include <string_view>
@@ -133,6 +134,8 @@ public:
         regions_[region_count_++]={base,bytes};
     }
     void* access(std::uint32_t address, std::size_t size) const { return pointer(address,size); }
+    void map_dynamic(std::uint32_t base,std::span<std::byte> bytes);
+    void unmap_dynamic(std::uint32_t base,std::uint32_t size);
     void publish_writes() const { std::atomic_thread_fence(std::memory_order_seq_cst); }
     template<int Hint = _MM_HINT_NTA> void prefetch(std::uint32_t address) const {
         if(address>=base_ && static_cast<std::uint64_t>(address)-base_<bytes_.size())
@@ -177,8 +180,10 @@ public:
             throw std::runtime_error("String move wraps the mapped address space");
         auto* to = pointer(static_cast<std::uint32_t>(destination - displacement), size);
         const auto* from = pointer(static_cast<std::uint32_t>(source - displacement), size);
-        const auto distance = destination > source ? destination - source : source - destination;
-        if (distance >= size || (descending ? destination >= source : destination <= source)) {
+        // Guest aliases can overlap in RAM despite distant virtual addresses.
+        const auto target = reinterpret_cast<std::uintptr_t>(to), origin = reinterpret_cast<std::uintptr_t>(from);
+        const auto distance = target > origin ? target - origin : origin - target;
+        if (distance >= size || (descending ? target >= origin : target <= origin)) {
             std::memmove(to, from, static_cast<std::size_t>(size));
         } else {
             // An overlapping REP MOVS can read data written by an earlier element.
@@ -219,6 +224,7 @@ private:
     struct Region { std::uint32_t base; std::span<std::byte> bytes; };
     std::array<Region,8> regions_{};
     unsigned region_count_=0;
+    std::map<std::uint32_t,std::span<std::byte>> dynamic_regions_;
 };
 
 inline void load_code_selector(Cpu& cpu,const Memory& memory,std::uint16_t selector,std::uint32_t offset) {

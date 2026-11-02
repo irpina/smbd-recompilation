@@ -130,7 +130,7 @@ std::string replay_frame(const std::filesystem::path& capture,const std::filesys
     std::set<std::uint32_t> retired;
     std::uint64_t payload_bytes=0;
     const auto read_payload=[&](Json name,std::uint32_t size) {
-        if(size>64*1024*1024-payload_bytes) throw std::runtime_error("Replay resources exceed 64 MiB");
+        if(size>128*1024*1024-payload_bytes) throw std::runtime_error("Replay resources exceed the capture's 128 MiB limit");
         payload_bytes+=size;return payload(capture,name,size);
     };
     bool verified=false;
@@ -182,7 +182,7 @@ std::string replay_frame(const std::filesystem::path& capture,const std::filesys
     };
     records(capture/"draws.jsonl",[&](Json record) {
         const auto type=record.at("type").string();
-        if(type=="clear" || type=="blit" || type=="release") emit();
+        if(type=="clear" || type=="blit" || type=="surface_write" || type=="release") emit();
         if(type=="texture") {
             auto bytes=read_payload(record.at("guest_data"),record.at("size").number());
             const auto texture=renderer.upload({record.at("width").number(),record.at("height").number(),TextureFormat(record.at("format").number()),bytes,
@@ -195,6 +195,10 @@ std::string replay_frame(const std::filesystem::path& capture,const std::filesys
             std::array<std::int32_t,4> bounds{};for(unsigned i=0;i<4;++i) bounds[i]=static_cast<std::int32_t>(rectangle[i].number());
             renderer.clear_buffers(record.at("flags").number(),record.at("color").hex(),((format>>4)&15)==1?float(value&65535)/65535:float(value>>8)/16777215,
                 static_cast<std::uint8_t>(value),bounds);
+        } else if(type=="surface_write" && only==UINT32_MAX) {
+            const auto bytes=read_payload(record.at("guest_data"),record.at("size").number());
+            renderer.write_region(resources.at(record.at("resource").number()),record.at("x").number(),record.at("y").number(),
+                record.at("width").number(),record.at("height").number(),bytes,record.at("pitch").number());
         } else if(type=="blit" && only==UINT32_MAX) {
             const auto from=record.at("source_xy").array(2),to=record.at("destination_xy").array(2),size=record.at("size").array(2);
             if(from.size()!=2 || to.size()!=2 || size.size()!=2) throw std::runtime_error("Invalid captured copy rectangle");

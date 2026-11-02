@@ -1,0 +1,51 @@
+Ultrawide character-selection backgrounds (2026-11-02)
+
+Supported USA XBE SHA-256:
+9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2
+XISO verification: build/logs/character-backdrops-disc.json.
+Capture: frame-1793645985894-293076409900, 611 draws, 3x/MSAA4, 21:9.
+
+The four flower backgrounds are draw pairs385..392. They use the perspective
+UI projection, whereas characters have their own scene cameras and labels use
+the orthographic UI projection. Current-build native execution reproduced the
+background centres at guest x151/263/377/489 even after the preceding HUD fix.
+
+Original UI producer6A1E0 pushes the fixed 4:3 aspect at6A206 (68ABAAAA3F)
+and calls perspective builder347A0 at6A222 (E879A5FCFF). The background geometry
+already contains the native16:9 layout. Extending that layout to21:9 requires
+an extra21/16 in this separate projection's aspect: (4/3)*(21/16)=7/4.
+Using21/9 here would compensate twice for the native layout.
+
+src/recompiler.cpp now selects7/4 for that verified PUSH only when ultrawide
+is active. Other aspect modes retain the original4/3 value. No individual
+sprite offsets, texture identifiers, vertices, scene cameras or shaders change.
+
+Native before/after probes of6A1E0 use captured RAM/pageable memory, the actual
+host UI canvas values, a free ended-worker stack and the captured push-buffer
+allocation. Both emit226 UI draws. All vertices and draw counts are identical.
+Only constant96.x changes, on the eleven perspective UI draws385..395;
+the other215 native UI draws are identical. Background centre pairs become
+191.2381/276.5714/363.4286/448.7619, matching the 16/21 horizontal extension
+about the screen centre within0.00001 guest pixel. Y, depth and W are unchanged.
+Evidence: build/logs/character-backdrops-native-{before,after}.json and
+character-backdrops-native-validation.json. Original producer analysis is in
+build/logs/ultrawide-map-draw-original/0x0006A1E0.json, tied to the same XBE.
+
+Offscreen replay: build/checks/character-backdrops/corrected/frame.png.
+All611 draws complete with zero D3D11 errors on NVIDIA GeForce RTX5060Ti.
+The derived trace changes only those eleven projection words; all600 remaining
+draw records and every resource/vertex file are preserved. The original capture
+is untouched. Baseline replay differs from the supplied image by2494 pixels;
+the layout verification uses exact native producer comparisons rather than
+claiming that baseline is pixel-identical.
+
+Both release executables rebuilt:10629 functions, zero unresolved calls.
+CPU checks22 pass. Separate native4:3 and16:9 cases retain the original UI
+projection on all eleven draws. All248 native HUD/minimap draws from the
+previous ultrawide regression remain identical. git diff --check passes.
+Aggregate: build/logs/character-backdrops-validation.json. No game session was
+launched; these checks establish layout correctness, not Xbox visual parity
+or gameplay performance.
+
+Independent transform/projection rules:
+https://learn.microsoft.com/en-us/windows/win32/dxtecharts/the-direct3d-transformation-pipeline

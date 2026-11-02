@@ -33,6 +33,29 @@ constexpr std::uint32_t success=0,invalid_handle=0xC0000008,invalid_parameter=0x
     buffer_too_small=0xC0000023,no_media=0xC0000013,end_of_file=0xC0000011;
 constexpr std::uint32_t page=4096,kernel_base=0x80010000,return_sentinel=0xFFFFFFF0;
 constexpr std::uint32_t memory_nozero=0x800000; // Xbox MEM_NOZERO, used by its heap allocator.
+void ui_canvas(Memory& memory,bool ultrawide) {
+    // Original 16:9 layout records: width, height, canvas width/height,
+    // safe left/top/right/bottom and centre. Layout 1 is the shorter view.
+    for(unsigned layout=0;layout<3;++layout) {
+        const auto base=0x4B62C0U+40*layout;
+        const float width=ultrawide?(layout==1?840.0f:1120.0f):(layout==1?640.0f:480.0f*16/9);
+        for(const auto [offset,value]:{std::pair{0U,width},{8U,ultrawide?1120.0f:480.0f*16/9},
+            {24U,width-16},{32U,width/2}}) memory.store<std::uint32_t>(base+offset,std::bit_cast<std::uint32_t>(value));
+    }
+}
+std::uint32_t file_access(std::uint32_t access) {
+    if(access&GENERIC_READ) access|=FILE_GENERIC_READ;
+    if(access&GENERIC_WRITE) access|=FILE_GENERIC_WRITE;
+    if(access&GENERIC_EXECUTE) access|=FILE_GENERIC_EXECUTE;
+    if(access&GENERIC_ALL) access|=FILE_ALL_ACCESS;
+    return access&~(GENERIC_READ|GENERIC_WRITE|GENERIC_EXECUTE|GENERIC_ALL);
+}
+constexpr std::uint32_t file_share_read_rights=FILE_READ_DATA|FILE_EXECUTE;
+std::uint8_t file_access_flags(std::uint32_t access,std::uint32_t share) {
+    const auto flags=((access&file_share_read_rights)?2U:0U)|
+        ((access&(FILE_WRITE_DATA|FILE_APPEND_DATA))?4U:0U)|((access&DELETE)?8U:0U);
+    return static_cast<std::uint8_t>(flags?flags|((share&7)<<4):0U);
+}
 std::uint32_t align_up(std::uint32_t value,std::uint32_t alignment) {
     if(!alignment || (alignment&(alignment-1)) || value>UINT32_MAX-(alignment-1))
         throw std::runtime_error("Invalid guest allocation alignment or size");
@@ -106,10 +129,12 @@ struct Xbox::State {
         ~AlertableWait(){thread.alertable=prior;}
     };
     enum class AllocationKind { pool,virtual_memory,stack,cache };
+    struct VirtualRelease {void operator()(std::byte* p) const {if(p) VirtualFree(p,0,MEM_RELEASE);}};
     struct Allocation {
         std::uint32_t size,protect;
         std::vector<std::uint32_t> pages;
         AllocationKind kind=AllocationKind::pool;
+        std::unique_ptr<std::byte,VirtualRelease> storage;
     };
     struct OpenFile {
         DiscEntry entry{};
@@ -182,6 +207,34 @@ struct Xbox::State {
     std::deque<BootIo> io_trace;
     std::map<std::uint32_t,Allocation> allocations;
     std::array<std::uint32_t,5> last_failed_allocation{};
+    struct MemoryStatus {
+        std::uint32_t allocations=0,reserved=0,committed=0,unallocated=0,largest_free=0,cache=0;
+        std::uint32_t available_physical=0;
+    };
+    struct MemoryOperation {
+        std::uint64_t tick=0;
+        std::uint32_t ordinal=0,thread=0,callsite=0,result=0,base_before=0,size_before=0,base_after=0,size_after=0;
+        std::array<std::uint32_t,5> arguments{};
+        unsigned argument_count=0;
+        bool failed=false;
+        MemoryStatus failure_memory;
+    };
+    struct TextureLock {
+        std::uint64_t tick=0;
+        std::uint32_t callsite=0,resource=0,level=0,output=0,rectangle=0,flags=0,pitch=0,pointer=0;
+        std::array<std::uint32_t,5> header{};
+        bool texture=false,header_readable=false,completed=false;
+    };
+    struct ModeChange {
+        std::uint64_t tick=0;
+        std::array<std::uint32_t,4> state{}; // mode 6C9354, scene 6C9288, menu 8B2680, party 8B23D1.
+    };
+    // Fixed rings retain context for a failure report; no per-event file IO or allocation.
+    std::array<MemoryOperation,64> memory_history{};
+    std::array<MemoryOperation,16> memory_failures{};
+    std::array<TextureLock,16> texture_history{};
+    std::array<ModeChange,64> mode_history{};
+    std::uint64_t memory_operations=0,memory_failure_count=0,texture_locks=0,mode_changes=0;
     std::map<std::uint32_t,Object> handles;
     struct Timer { std::chrono::steady_clock::time_point due; std::uint32_t period,dpc; };
     std::map<std::uint32_t,Timer> timers;
@@ -263,6 +316,14 @@ struct Xbox::State {
             // only indexed readers configure cameras/culling and the UI canvas.
             if(memory.load<std::uint32_t>(0x402428)!=0x3FE38E39U || memory.load<std::uint32_t>(0x40242C)!=0x44555555U)
                 throw std::runtime_error("Original widescreen constants do not match the supported game");
+            for(unsigned layout=0;layout<3;++layout) {
+                const auto base=0x4B62C0U+40*layout;
+                const float width=layout==1?640.0f:480.0f*16/9;
+                for(const auto [offset,value]:{std::pair{0U,width},{8U,480.0f*16/9},{24U,width-16},{32U,width/2}})
+                    if(memory.load<std::uint32_t>(base+offset)!=std::bit_cast<std::uint32_t>(value))
+                        throw std::runtime_error("Original UI canvas does not match the supported game");
+            }
+            ui_canvas(memory,this->host.ultrawide);
             if(this->host.ultrawide) {
                 memory.store<std::uint32_t>(0x402428,std::bit_cast<std::uint32_t>(21.0f/9));
                 memory.store<std::uint32_t>(0x40242C,std::bit_cast<std::uint32_t>(480.0f*21/9));
@@ -346,10 +407,36 @@ struct Xbox::State {
             CancelIoEx(request.native,&request.overlap);
             DWORD transferred=0;GetOverlappedResult(request.native,&request.overlap,&transferred,TRUE);
         }
+        for(const auto& [address,block]:allocations) if(block.storage) memory.unmap_dynamic(address,block.size);
         for(auto& thread : threads) if(thread->fiber) DeleteFiber(thread->fiber);
         if(converted) ConvertFiberToThread();
     }
-    template<unsigned Ordinal> static void dispatch_kernel(void* context,Cpu& cpu,Memory&) {static_cast<State*>(context)->service<Ordinal>(cpu);}
+    template<unsigned Ordinal> static void dispatch_kernel(void* context,Cpu& cpu,Memory&) {
+        auto& state=*static_cast<State*>(context);
+        if constexpr(Ordinal==15 || Ordinal==17 || Ordinal==37 || Ordinal==165 || Ordinal==166 ||
+                     Ordinal==167 || Ordinal==171 || Ordinal==172 || Ordinal==184 || Ordinal==199) {
+            MemoryOperation event;event.tick=state.simulation_steps;event.ordinal=Ordinal;
+            event.thread=state.current?state.current->id:0;event.callsite=state.diagnostic_word(cpu.registers[esp]);
+            event.argument_count=Ordinal==166 || Ordinal==184?5:Ordinal==199?3:Ordinal==15 || Ordinal==167 || Ordinal==172?2:1;
+            for(unsigned i=0;i<event.argument_count;++i) event.arguments[i]=state.diagnostic_word(cpu.registers[esp]+4+i*4);
+            if constexpr(Ordinal==184 || Ordinal==199) {
+                event.base_before=state.diagnostic_word(event.arguments[0]);
+                event.size_before=state.diagnostic_word(event.arguments[Ordinal==184?2:1]);
+            }
+            state.service<Ordinal>(cpu);event.result=cpu.registers[eax];
+            if constexpr(Ordinal==184 || Ordinal==199) {
+                event.base_after=state.diagnostic_word(event.arguments[0]);
+                event.size_after=state.diagnostic_word(event.arguments[Ordinal==184?2:1]);
+            }
+            if constexpr(Ordinal==37 || Ordinal==184 || Ordinal==199) event.failed=static_cast<std::int32_t>(event.result)<0;
+            else if constexpr(Ordinal==15 || Ordinal==165 || Ordinal==166 || Ordinal==167) event.failed=event.result==0;
+            if(event.failed) {
+                event.failure_memory=state.memory_status();
+                state.memory_failures[state.memory_failure_count++%state.memory_failures.size()]=event;
+            }
+            state.memory_history[state.memory_operations++%state.memory_history.size()]=event;
+        } else state.service<Ordinal>(cpu);
+    }
     template<unsigned Ordinal> void bind() {services.entries[Ordinal]=dispatch_kernel<Ordinal>;}
     std::uint32_t export_data(unsigned ordinal,std::uint32_t size) {
         kernel_cursor=align_up(kernel_cursor,16);
@@ -384,11 +471,65 @@ struct Xbox::State {
         for(unsigned i=0;i<16;++i) derive(alternate+i*16,0xD0+i*16);
         diagnostic_record("{\"type\":\"storage_ready\",\"root\":"+json(path_text(user_root))+'}');
     }
+    std::uint32_t available_memory() const {
+        std::uint64_t used=heap_begin;
+        for(const auto& [address,block]:allocations)
+            used+=std::ranges::count_if(block.pages,[](auto value){return value!=0;})*page;
+        return used<ram.size()?static_cast<std::uint32_t>(ram.size()-used):0;
+    }
+    bool commit_virtual(std::uint32_t address,Allocation& block,std::uint32_t first,std::uint32_t last,std::uint32_t protect) {
+        const auto missing=std::ranges::count(block.pages.begin()+first,block.pages.begin()+last,0U);
+        if(std::uint64_t(missing)*page>available_memory() ||
+            !VirtualAlloc(block.storage.get()+first*page,(last-first)*page,MEM_COMMIT,PAGE_READWRITE)) return false;
+        for(auto index=first;index<last;) {
+            if(block.pages[index]) {++index;continue;}
+            const auto start=index;while(index<last && !block.pages[index]) ++index;
+            memory.map_dynamic(address+start*page,{block.storage.get()+start*page,(index-start)*page});
+        }
+        std::fill(block.pages.begin()+first,block.pages.begin()+last,protect);return true;
+    }
+    std::uint32_t reserve_virtual(std::uint32_t size,std::uint32_t requested,std::uint32_t flags,std::uint32_t protect) {
+        constexpr std::uint32_t granularity=65536,limit=0x7FFF0000;
+        const auto lower=align_up(static_cast<std::uint32_t>(ram.size()),granularity);
+        // This direct RAM window is already mapped. Use the remaining Xbox
+        // user address space for pageable allocations backed by native services.
+        const auto offset=requested&(granularity-1);
+        const auto needed=std::uint64_t(size)+offset;
+        if(needed>limit-lower) return 0;
+        size=align_up(static_cast<std::uint32_t>(needed),page);
+        auto cursor=lower;
+        if(requested) cursor=requested&~(granularity-1);
+        else if(flags&MEM_TOP_DOWN) {
+            cursor=(limit-size)&~(granularity-1);
+            for(auto it=allocations.rbegin();it!=allocations.rend();++it) {
+                const auto& [base,block]=*it;
+                if(cursor>=std::uint64_t(base)+block.size) break;
+                if(std::uint64_t(cursor)+size<=base) continue;
+                if(base<size || base-size<lower) return 0;
+                cursor=(base-size)&~(granularity-1);
+            }
+        }
+        if(!(flags&MEM_TOP_DOWN) || requested) for(const auto& [base,block]:allocations) {
+            if(std::uint64_t(cursor)+size<=base) break;
+            if(cursor>=std::uint64_t(base)+block.size) continue;
+            if(requested) return 0;
+            cursor=align_up(base+block.size,granularity);
+        }
+        if(cursor<lower || std::uint64_t(cursor)+size>limit) return 0;
+        Allocation block{size,protect,std::vector<std::uint32_t>(size/page),AllocationKind::virtual_memory,{}};
+        block.storage.reset(static_cast<std::byte*>(VirtualAlloc(nullptr,size,MEM_RESERVE,PAGE_NOACCESS)));
+        if(!block.storage) return 0;
+        if((flags&MEM_COMMIT) && !commit_virtual(cursor,block,0,size/page,protect)) return 0;
+        allocations.emplace(cursor,std::move(block));return cursor;
+    }
     std::uint32_t allocate(std::uint32_t size,std::uint32_t alignment,bool committed,std::uint32_t protect,
                            std::uint32_t requested=0,std::uint32_t lowest=0,std::uint32_t highest=UINT32_MAX,bool clear=true,bool top_down=false) {
         const auto fail=[&] {last_failed_allocation={size,alignment,requested,lowest,highest};return 0U;};
-        if(!size) return fail();
-        size=align_up(size,page); alignment=std::max(alignment,page);
+        alignment=std::max(alignment,page);
+        if(!size || size>ram.size() || alignment>ram.size() || !std::has_single_bit(alignment) ||
+            lowest>=ram.size() || highest<lowest) return fail();
+        size=align_up(size,page);
+        if(committed && size>available_memory()) return fail();
         const auto lower=align_up(std::max(heap_begin,lowest),alignment);
         const auto upper=std::min<std::uint64_t>(ram.size(),static_cast<std::uint64_t>(highest)+1);
         auto cursor=lower;
@@ -417,16 +558,20 @@ struct Xbox::State {
         return cursor;
     }
     auto allocation(std::uint32_t address) {
-        address&=0x0FFFFFFF;
+        const auto alias=address&0xF0000000U;
+        const bool physical=address>=0x80000000U;
+        if(physical && alias!=0x80000000U && alias!=0xF0000000U) return allocations.end();
+        if(physical) address&=0x0FFFFFFF;
         auto found=allocations.upper_bound(address);
         if(found==allocations.begin()) return allocations.end();
         --found;
-        return address-found->first<found->second.size?found:allocations.end();
+        return address-found->first<found->second.size && !(physical && found->second.storage)?found:allocations.end();
     }
     void release_allocation(std::uint32_t base) {
         const auto found=allocations.find(base);
         if(found==allocations.end()) return;
-        if(gpu) gpu->invalidate_memory(found->first,found->second.size);
+        if(found->second.storage) memory.unmap_dynamic(found->first,found->second.size);
+        if(gpu && found->first<0x10000000U) gpu->invalidate_memory(found->first,found->second.size);
         allocations.erase(found);
     }
     std::uint32_t cache_size(std::uint32_t pages) {
@@ -447,6 +592,99 @@ struct Xbox::State {
         return cache_pages==pages?success:no_memory;
     }
     std::uint32_t argument(const Cpu& cpu,unsigned index) { return memory.load<std::uint32_t>(cpu.registers[esp]+4+index*4); }
+    Bytes diagnostic_bytes(std::uint32_t address,std::size_t size) const {
+        if(address>=ram.size() && address<0x80000000U) {
+            auto found=allocations.upper_bound(address);
+            if(found==allocations.begin()) return {};
+            --found;const auto offset=address-found->first;
+            if(!found->second.storage || offset>=found->second.size) return {};
+            size=std::min<std::size_t>(size,found->second.size-offset);
+            try {return {static_cast<const std::byte*>(memory.access(address,size)),size};} catch(...) {return {};}
+        }
+        const auto alias=address&0xF0000000U;
+        if(!address || (alias && alias!=0x80000000U && alias!=0xF0000000U)) return {};
+        address&=0x0FFFFFFFU;
+        if(alias && address<heap_begin) return {}; // Kernel exports are not physical-RAM aliases.
+        if(address>=ram.size()) return {};
+        return ram.subspan(address,std::min(size,ram.size()-address));
+    }
+    std::uint32_t diagnostic_word(std::uint32_t address) const {
+        const auto bytes=diagnostic_bytes(address,4);return bytes.size()==4?u32(bytes,0):0;
+    }
+    MemoryStatus memory_status() const {
+        MemoryStatus result;result.allocations=static_cast<std::uint32_t>(allocations.size());
+        result.available_physical=available_memory();
+        std::uint32_t cursor=heap_begin;
+        for(const auto& [address,block]:allocations) {
+            if(!block.storage) {
+                if(address>cursor) {result.unallocated+=address-cursor;result.largest_free=std::max(result.largest_free,address-cursor);}
+                cursor=address+block.size;
+            }
+            result.reserved+=block.size;
+            result.committed+=static_cast<std::uint32_t>(std::ranges::count_if(block.pages,[](auto protect){return protect!=0;})*page);
+            if(block.kind==AllocationKind::cache) result.cache+=block.size;
+        }
+        if(cursor<ram.size()) {
+            const auto tail=static_cast<std::uint32_t>(ram.size()-cursor);
+            result.unallocated+=tail;result.largest_free=std::max(result.largest_free,tail);
+        }
+        return result;
+    }
+    void record_mode() {
+        const std::array values{diagnostic_word(0x6C9354),diagnostic_word(0x6C9288)&0xFFFFU,
+            diagnostic_word(0x8B2680)&0xFFU,diagnostic_word(0x8B23D1)&0xFFU};
+        if(!mode_changes || mode_history[(mode_changes-1)%mode_history.size()].state!=values)
+            mode_history[mode_changes++%mode_history.size()]={simulation_steps,values};
+    }
+    std::string failure_report(const Cpu& cpu) {
+        record_mode();
+        const auto words=[](std::span<const std::uint32_t> values) {
+            std::string result="[";
+            for(auto value:values) {if(result.size()>1) result+=',';result+=json(hex32(value));}
+            return result+']';
+        };
+        const auto status=[](const MemoryStatus& value) {
+            return std::format("{{\"allocations\":{},\"reserved_bytes\":{},\"committed_bytes\":{},\"available_physical_bytes\":{},\"unallocated_address_bytes\":{},\"largest_unallocated_range\":{},\"disc_cache_bytes\":{}}}",
+                value.allocations,value.reserved,value.committed,value.available_physical,value.unallocated,value.largest_free,value.cache);
+        };
+        const auto events=[&](const auto& ring,std::uint64_t count,const auto& serialize) {
+            std::string result="[";
+            for(std::uint64_t i=count-std::min<std::uint64_t>(count,ring.size());i<count;++i) {
+                if(result.size()>1) result+=',';result+=serialize(ring[i%ring.size()]);
+            }
+            return result+']';
+        };
+        const auto operation=[&](const MemoryOperation& event) {
+            return std::format("{{\"tick\":{},\"ordinal\":{},\"thread\":{},\"callsite\":{},\"arguments\":{},\"return\":{},\"failed\":{},\"base_before\":{},\"size_before\":{},\"base_after\":{},\"size_after\":{},\"memory_at_failure\":{}}}",
+                event.tick,event.ordinal,event.thread,json(hex32(event.callsite)),words(std::span(event.arguments).first(event.argument_count)),
+                json(hex32(event.result)),event.failed,json(hex32(event.base_before)),event.size_before,json(hex32(event.base_after)),event.size_after,
+                event.failed?status(event.failure_memory):"null");
+        };
+        std::ostringstream output;
+        output<<"{\"format\":\"smbd-failure-context-v1\",\"build\":"<<json(__DATE__ " " __TIME__)
+            <<",\"session_log\":"<<json(path_text(diagnostic_log()))<<",\"ram_bytes\":"<<ram.size()
+            <<",\"heap_begin\":"<<json(hex32(heap_begin))<<",\"memory\":"<<status(memory_status())
+            <<",\"memory_operation_count\":"<<memory_operations<<",\"memory_failure_count\":"<<memory_failure_count
+            <<",\"texture_lock_count\":"<<texture_locks<<",\"mode_change_count\":"<<mode_changes
+            <<",\"recent_memory_operations\":"<<events(memory_history,memory_operations,operation)
+            <<",\"recent_memory_failures\":"<<events(memory_failures,memory_failure_count,operation)
+            <<",\"recent_texture_locks\":"<<events(texture_history,texture_locks,[&](const TextureLock& event) {
+                return std::format("{{\"tick\":{},\"callsite\":{},\"api\":{},\"resource\":{},\"mip\":{},\"output\":{},\"rectangle\":{},\"flags\":{},\"header_readable\":{},\"header_words\":{},\"helper_returned\":{},\"pitch\":{},\"pixels\":{}}}",
+                    event.tick,json(hex32(event.callsite)),json(event.texture?"D3D_LockTexture":"D3D_LockSurface"),json(hex32(event.resource)),event.level,
+                    json(hex32(event.output)),json(hex32(event.rectangle)),json(hex32(event.flags)),event.header_readable,words(event.header),event.completed,event.pitch,json(hex32(event.pointer)));
+            })<<",\"recent_mode_changes\":"<<events(mode_history,mode_changes,[&](const ModeChange& event) {
+                return std::format("{{\"tick\":{},\"mode\":{},\"scene\":{},\"menu\":{},\"party_selection\":{}}}",event.tick,event.state[0],event.state[1],event.state[2],event.state[3]);
+            })<<",\"register_memory\":[";
+        constexpr std::string_view names[]={"eax","ecx","edx","ebx","esp","ebp","esi","edi"};
+        for(unsigned i=0;i<cpu.registers.size();++i) {
+            if(i) output<<',';const auto address=cpu.registers[i];
+            const auto bytes=address>=0x10000?diagnostic_bytes(address,160):Bytes{};
+            output<<"{\"register\":"<<json(names[i])<<",\"address\":"<<json(hex32(address))<<",\"bytes\":"<<json(hex_bytes(bytes))<<'}';
+        }
+        const auto heap=diagnostic_word(0xA5FC84); // Original LocalAlloc's process heap slot at 3087D4.
+        output<<"],\"sdk_heap\":{\"address\":"<<json(hex32(heap))<<",\"bytes\":"<<json(hex_bytes(diagnostic_bytes(heap,160)))<<"}}";
+        return output.str();
+    }
     void finish(Cpu& cpu,unsigned cleanup,std::optional<std::uint64_t> result=std::nullopt,bool wide=false) {
         cpu.eip=memory.load<std::uint32_t>(cpu.registers[esp]);
         cpu.registers[esp]+=4+cleanup;
@@ -656,6 +894,13 @@ struct Xbox::State {
         }
         objects.erase(address); object_references.erase(address);
     }
+    std::uint32_t dispatcher_owner(std::uint32_t address) const {
+        if(objects.contains(address)) return address;
+        // Waits on file handles use FILE_OBJECT.Event, not the object's base.
+        if(address>=0x38) if(const auto file=objects.find(address-0x38);
+            file!=objects.end() && file->second.kind==Object::Kind::file) return file->first;
+        return 0;
+    }
     std::uint32_t wait(std::span<const std::uint32_t> addresses,bool all,std::uint32_t timeout_pointer,bool alertable) {
         if(addresses.empty() || addresses.size()>64) return invalid_parameter;
         if(all) for(unsigned i=0;i<addresses.size();++i) for(unsigned j=0;j<i;++j) if(addresses[i]==addresses[j]) return invalid_parameter;
@@ -663,12 +908,14 @@ struct Xbox::State {
         const auto due=timeout_pointer?due_time(std::bit_cast<std::int64_t>(memory.load<std::uint64_t>(timeout_pointer))):
             std::chrono::steady_clock::time_point::max();
         struct References {
-            State& host; std::span<const std::uint32_t> addresses;
-            ~References() { for(auto address:addresses) if(host.objects.contains(address)) {
-                --host.object_references[address]; host.release_object(address);
+            State& host; std::array<std::uint32_t,64> owners{};
+            ~References() { for(auto address:owners) if(address) {
+                --host.object_references.at(address); host.release_object(address);
             }}
-        } references{*this,addresses};
-        for(auto address:addresses) if(objects.contains(address)) ++object_references[address];
+        } references{*this};
+        for(unsigned i=0;i<addresses.size();++i) if(const auto owner=dispatcher_owner(addresses[i])) {
+            ++object_references[owner];references.owners[i]=owner;
+        }
         for(;;) {
             if(alertable) {dispatch_io();if(deliver_apcs()) return 0xC0;}
             bool complete=true; std::optional<unsigned> selected;
@@ -900,6 +1147,7 @@ struct Xbox::State {
         timing_finished=FrameClock::Clock::now();if(!simulation_steps) timing_started=timing_finished;
         if(main_frame && render_rate()!=60) source_clock.discard_overrun(timing_finished);
         if(!main_frame || frame_step.logic) ++simulation_steps;
+        if(!main_frame || frame_step.logic) record_mode();
         if(in_frame_loop && !main_frame) {frame_started=timing_finished;frame_step={};}
     }
     std::string counted_string(std::uint32_t address) {
@@ -1192,13 +1440,20 @@ struct Xbox::State {
             const bool texture=api=="D3D_LockTexture";
             const auto resource=argument(cpu,0),level=texture?argument(cpu,1):0U;
             const auto output=argument(cpu,texture?2:1),rectangle=argument(cpu,texture?3:2),flags=argument(cpu,texture?4:3);
+            auto& event=texture_history[texture_locks++%texture_history.size()];event={};
+            event.tick=simulation_steps;event.callsite=diagnostic_word(cpu.registers[esp]);event.texture=texture;
+            event.resource=resource;event.level=level;event.output=output;event.rectangle=rectangle;event.flags=flags;
+            const auto header=diagnostic_bytes(resource,sizeof(event.header));event.header_readable=header.size()==sizeof(event.header);
+            if(event.header_readable) std::memcpy(event.header.data(),header.data(),header.size());
             const std::array arguments{resource,0U,level,output,rectangle,flags};
             // Keep the original SDK's format, mip, rectangle and address rules.
             graphics_helper(cpu,0x00321BA0,0x0031F580,arguments);
+            event.pitch=diagnostic_word(output);event.pointer=diagnostic_word(output+4);event.completed=true;
             if(!(flags&0x80)) { // Xbox D3DLOCK_READONLY; 0x10 is NOFLUSH.
                 const auto pointer=memory.load<std::uint32_t>(output+4)&0x0FFFFFFFU;
                 const auto block=allocation(pointer);
-                if(block==allocations.end()) throw NativeBoundary(cpu.eip,"texture write lock has no native allocation");
+                if(block==allocations.end()) throw NativeBoundary(cpu.eip,std::format(
+                    "texture write lock has no native allocation (resource {}, pixels {}, caller {})",hex32(resource),hex32(event.pointer),hex32(event.callsite)));
                 gpu->invalidate_memory(block->first,block->second.size);
             }
             finish(cpu,texture?20:16);return;
@@ -1431,7 +1686,7 @@ struct Xbox::State {
     std::uint32_t open_writable(Cpu& cpu,const std::string& name,unsigned options_index,unsigned share_index,std::uint32_t disposition,std::uint32_t& information) {
         const auto path=writable_path(name);
         if(!path) return name_not_found;
-        const auto access=argument(cpu,1),options=argument(cpu,options_index),share=argument(cpu,share_index);
+        const auto access=file_access(argument(cpu,1)),options=argument(cpu,options_index),share=argument(cpu,share_index);
         if(disposition>5 || share>7) return invalid_parameter;
         auto attributes=GetFileAttributesW(path->c_str());
         const bool existed=attributes!=INVALID_FILE_ATTRIBUTES;
@@ -1455,7 +1710,7 @@ struct Xbox::State {
         if(!base) return no_memory;
         const auto address=base|0x80000000U,handle=next_handle;next_handle+=4;
         memory.store<std::uint16_t>(address,5);
-        memory.store<std::uint8_t>(address+2,static_cast<std::uint8_t>(((access&(0x80000000U|1U))?2:0)|((access&(0x40000000U|6U))?4:0)|((share&7)<<4)));
+        memory.store<std::uint8_t>(address+2,file_access_flags(access,share));
         dispatcher(address+0x28,1,16,1);dispatcher(address+0x38,0,16,1);
         const Object object{Object::Kind::file,address,nullptr,file};handles.emplace(handle,object);objects.emplace(address,object);
         memory.store<std::uint32_t>(argument(cpu,0),handle);
@@ -1539,24 +1794,26 @@ struct Xbox::State {
         if(event) memory.store<std::uint32_t>(handles.at(event).address+4,1);
         if((status>>30)!=3) queue_apc(*current,argument(cpu,2),argument(cpu,3),argument(cpu,4));
     }
+    bool valid_file_transfer(const OpenFile& file,std::uint64_t offset,std::uint32_t length=0) const {
+        const auto sector=file.native!=INVALID_HANDLE_VALUE?512U:2048U;
+        // The native handles are buffered because original callers use ordinary
+        // heap pointers. Guest unbuffered offsets and lengths still use sectors.
+        return offset<=INT64_MAX && (!(file.options&8) || (!(offset%sector) && !(length%sector)));
+    }
     std::uint32_t queue_io(Cpu& cpu,const Object& object,bool write,std::uint64_t offset) {
         auto& file=*object.file;
         const auto output=argument(cpu,5),length=argument(cpu,6),status=argument(cpu,4),event=argument(cpu,1);
         const auto fail=[&](std::uint32_t result) {
+            memory.store<std::uint32_t>(object.address+0x38+4,1);
             io_complete(cpu,result);trace_io(cpu,write?236:219,result,0,file.path,file.options,length,offset,output);return result;
         };
-        if(offset>INT64_MAX) return fail(invalid_parameter);
+        if(!valid_file_transfer(file,offset,length)) return fail(invalid_parameter);
         if(file.entry.directory() && !file.device) return fail(0xC00000BA);
         if(write && file.native==INVALID_HANDLE_VALUE) return fail(write_protected);
         if(!write && !(file.access&(0x80000000U|1U))) return fail(access_denied);
-        const auto sector=file.native!=INVALID_HANDLE_VALUE?512U:2048U;
-        // Original callers use ordinary heap buffers.
-        // Enforce sector transfers without imposing Windows DMA alignment on
-        // the guest's pointer; our mounted-image handle is buffered.
-        if((file.options&8) && ((offset%sector) || (length%sector))) return fail(invalid_parameter);
         memory.access(status,8);const auto buffer=memory.access(output,length);
         const auto size=file_size(file);
-        if(!length) {io_complete(cpu,success);return success;}
+        if(!length) return fail(success);
         if(!write && offset>=size) return fail(end_of_file);
         const auto count=write?length:static_cast<std::uint32_t>(std::min<std::uint64_t>(length,size-offset));
         const auto disc_offset=offset+(file.device?0:std::uint64_t(file.entry.sector)*2048);
@@ -1590,6 +1847,10 @@ struct Xbox::State {
         if(!issued && GetLastError()!=ERROR_IO_PENDING) {
             const auto result=file_error(GetLastError());request->file.reset();return fail(result);
         }
+        // Native handles alone do not retain the guest objects that completion
+        // signals. Keep both alive even if another thread closes their handles.
+        ++object_references[request->file_object];
+        if(request->event) ++object_references[request->event];
         request->active=true;++pending_io_count;
         trace_io(cpu,request->ordinal,0x103,0,file.path,file.options,length,offset,output);
         return 0x103;
@@ -1615,7 +1876,11 @@ struct Xbox::State {
                 io_trace.push_back({request.ordinal,result,transferred,request.callsite,request.file->path,
                     request.file->options,request.requested,request.offset,request.buffer});
             }
+            const auto file_object=request.file_object,event=request.event;
             request.file.reset();request.active=false;--pending_io_count;
+            for(auto address:{file_object,event}) if(address) {
+                --object_references.at(address);release_object(address);
+            }
         }
     }
     std::uint32_t open_file(Cpu& cpu,unsigned options_index,unsigned share_index,std::uint32_t disposition,std::uint32_t& information) {
@@ -1626,18 +1891,18 @@ struct Xbox::State {
         if(!disc) return no_media;
         const auto entry=disc->lookup(*relative);
         if(!entry) return name_not_found;
-        const auto access=argument(cpu,1),options=argument(cpu,options_index),share=argument(cpu,share_index);
+        const auto access=file_access(argument(cpu,1)),options=argument(cpu,options_index),share=argument(cpu,share_index);
         if(disposition>5 || share>7) return invalid_parameter;
         if(disposition==2) return 0xC0000035; // FILE_CREATE on an existing path.
         if(disposition!=1 && disposition!=3) return write_protected;
-        if(access&(0x40000000U|0x00010000U|0x00000116U)) return access_denied;
+        if(access&(DELETE|FILE_WRITE_DATA|FILE_APPEND_DATA|FILE_WRITE_EA|FILE_WRITE_ATTRIBUTES)) return access_denied;
         if((options&1) && !entry->directory()) return 0xC0000103;
         if((options&0x40) && entry->directory()) return 0xC00000BA;
         if(options&0x1000) return write_protected; // Delete on close.
         auto share_path=folded(*name);
         for(const auto& [handle,existing]:handles) if(existing.kind==Object::Kind::file && existing.file->share_path==share_path) {
-            if((access&(0x80000000U|1U)) && !(existing.file->share&1)) return 0xC0000043;
-            if((existing.file->access&(0x80000000U|1U)) && !(share&1)) return 0xC0000043;
+            if((access&file_share_read_rights) && (existing.file->access&file_share_read_rights) &&
+                (!(existing.file->share&1) || !(share&1))) return 0xC0000043;
         }
         const auto base=allocate_object();
         if(!base) return no_memory;
@@ -1646,7 +1911,7 @@ struct Xbox::State {
         file->share_path=std::move(share_path);
         file->access=access;file->share=share;file->options=options;file->device=relative->empty();
         memory.store<std::uint16_t>(address,5);
-        memory.store<std::uint8_t>(address+2,static_cast<std::uint8_t>(((access&(0x80000000U|1U))?2:0)|((share&7)<<4)));
+        memory.store<std::uint8_t>(address+2,file_access_flags(access,share));
         // Xbox FILE_OBJECT uses four-byte packing: byte offset at +0x14,
         // lock event at +0x28 and completion event at +0x38.
         dispatcher(address+0x28,1,16,1);dispatcher(address+0x38,0,16,1);
@@ -1779,18 +2044,22 @@ struct Xbox::State {
                 const auto output=argument(cpu,5),length=argument(cpu,6),offset_pointer=argument(cpu,7);
                 auto offset=offset_pointer?memory.load<std::uint64_t>(offset_pointer):UINT64_MAX-1;
                 if(offset==UINT64_MAX-1) offset=file.position;
+                bool append_only=false;
+                if constexpr(Ordinal==236) {
+                    // Append-only handles ignore the caller's offset and need no seek.
+                    append_only=(file.access&4U) && !(file.access&(GENERIC_WRITE|GENERIC_ALL|2U));
+                    if(append_only || offset==UINT64_MAX) offset=file_size(file);
+                }
                 trace_buffer=output;trace_requested=length;trace_offset=offset;
                 if(!(file.options&0x30)) {
-                    if constexpr(Ordinal==236) if(offset==UINT64_MAX) offset=file_size(file);
                     finish(cpu,cleanup,queue_io(cpu,found->second,Ordinal==236,offset));return;
                 }
-                if(file.native!=INVALID_HANDLE_VALUE) {
-                    if constexpr(Ordinal==236) if(offset==UINT64_MAX) offset=file_size(file);
-                    if(offset>INT64_MAX) result=invalid_parameter;
-                    else if(file.entry.directory()) result=0xC00000BA;
+                if(!valid_file_transfer(file,offset,length)) result=invalid_parameter;
+                else if(file.native!=INVALID_HANDLE_VALUE) {
+                    if(file.entry.directory()) result=0xC00000BA;
                     else {
                         const LARGE_INTEGER position{.QuadPart=static_cast<LONGLONG>(offset)};
-                        if(!SetFilePointerEx(file.native,position,nullptr,FILE_BEGIN)) result=file_error(GetLastError());
+                        if(!append_only && !SetFilePointerEx(file.native,position,nullptr,FILE_BEGIN)) result=file_error(GetLastError());
                         else {
                             const auto buffer=memory.access(output,length);
                             BOOL completed;DWORD native_written=0;
@@ -1803,7 +2072,6 @@ struct Xbox::State {
                         }
                     }
                 } else if constexpr(Ordinal==236) result=write_protected;
-                else if(offset>INT64_MAX) result=invalid_parameter;
                 else if(!(file.access&(0x80000000U|1U))) result=access_denied;
                 else if(file.entry.directory() && !file.device) result=0xC00000BA;
                 else if(length) {
@@ -1885,7 +2153,7 @@ struct Xbox::State {
                     if(argument(cpu,3)<8) result=buffer_too_small;
                     else {
                         const auto offset=memory.load<std::uint64_t>(argument(cpu,2));
-                        if(offset>INT64_MAX) result=invalid_parameter;
+                        if(!valid_file_transfer(file,offset)) result=invalid_parameter;
                         else {file.position=offset;memory.store<std::uint64_t>(found->second.address+0x14,offset);}
                     }
                 } else if(file.native==INVALID_HANDLE_VALUE) result=write_protected;
@@ -2052,35 +2320,34 @@ struct Xbox::State {
             }
             if(base && !(flags&MEM_RESERVE)) {
                 const auto found=allocation(base);
-                if(found==allocations.end() || base-found->first+static_cast<std::uint64_t>(size)>found->second.size) {
+                if(found==allocations.end() || !found->second.storage || base-found->first+static_cast<std::uint64_t>(size)>found->second.size) {
                     finish(cpu,20,conflicting_addresses); return;
                 }
                 const auto first=(base-found->first)/page,last=align_up(base-found->first+size,page)/page;
-                if(!(flags&memory_nozero)) for(auto index=first;index<last;++index)
-                    if(!found->second.pages[index]) std::memset(memory.access(found->first+index*page,page),0,page);
-                std::fill(found->second.pages.begin()+first,found->second.pages.begin()+last,protect);
+                if(!commit_virtual(found->first,found->second,first,last,protect)) {finish(cpu,20,no_memory);return;}
                 memory.store<std::uint32_t>(output,base&~(page-1));
                 memory.store<std::uint32_t>(size_pointer,(last-first)*page); finish(cpu,20,success); return;
             }
-            const auto allocated=allocate(size,page,(flags&MEM_COMMIT)!=0,protect,base,0,UINT32_MAX,
-                !(flags&memory_nozero),(flags&MEM_TOP_DOWN)!=0);
-            if(allocated) allocations.at(allocated).kind=AllocationKind::virtual_memory;
-            if(allocated) { memory.store<std::uint32_t>(output,allocated); memory.store<std::uint32_t>(size_pointer,align_up(size,page)); }
+            const auto allocated=reserve_virtual(size,base,flags,protect);
+            if(allocated) { memory.store<std::uint32_t>(output,allocated); memory.store<std::uint32_t>(size_pointer,allocations.at(allocated).size); }
             finish(cpu,20,allocated?success:(base?conflicting_addresses:no_memory));
         } else if constexpr(Ordinal==199) {
             const auto pointer=argument(cpu,0),size_pointer=argument(cpu,1),flags=argument(cpu,2);
             const auto base=memory.load<std::uint32_t>(pointer),size=memory.load<std::uint32_t>(size_pointer);
             const auto found=allocation(base);
-            if(found==allocations.end() || (flags!=MEM_RELEASE && flags!=MEM_DECOMMIT) ||
+            if(found==allocations.end() || !found->second.storage || (flags!=MEM_RELEASE && flags!=MEM_DECOMMIT) ||
+                base<found->first || base-found->first>=found->second.size || size>found->second.size-(base-found->first) ||
                 (flags==MEM_RELEASE && (size || base!=found->first))) { finish(cpu,12,invalid_parameter); return; }
             if(flags==MEM_RELEASE) { release_allocation(found->first); memory.store<std::uint32_t>(pointer,0); memory.store<std::uint32_t>(size_pointer,0); }
             else {
                 const auto first=(base-found->first)/page;
                 const auto last=size?align_up(base-found->first+size,page)/page:found->second.size/page;
                 if(last>found->second.pages.size()) { finish(cpu,12,invalid_parameter); return; }
-                if(gpu) gpu->invalidate_memory(found->first+first*page,(last-first)*page);
+                memory.unmap_dynamic(found->first+first*page,(last-first)*page);
+                if(gpu && found->first<0x10000000U) gpu->invalidate_memory(found->first+first*page,(last-first)*page);
+                if(!VirtualFree(found->second.storage.get()+first*page,(last-first)*page,MEM_DECOMMIT))
+                    throw NativeBoundary(cpu.eip,"native virtual-memory decommit failed");
                 std::fill(found->second.pages.begin()+first,found->second.pages.begin()+last,0);
-                std::memset(memory.access(found->first+first*page,(last-first)*page),0,(last-first)*page);
                 memory.store<std::uint32_t>(pointer,found->first+first*page); memory.store<std::uint32_t>(size_pointer,(last-first)*page);
             }
             finish(cpu,12,success);
@@ -2141,24 +2408,32 @@ struct Xbox::State {
             release_allocation(found->first); finish(cpu,4);
         } else if constexpr(Ordinal==180 || Ordinal==23 || Ordinal==179) {
             const auto found=allocation(argument(cpu,0));
-            finish(cpu,4,found==allocations.end()?0:Ordinal==179?found->second.pages[((argument(cpu,0)&0x0FFFFFFF)-found->first)/page]:found->second.size);
+            const auto address=argument(cpu,0)>=0x80000000U?argument(cpu,0)&0x0FFFFFFFU:argument(cpu,0);
+            finish(cpu,4,found==allocations.end()?0:Ordinal==179?found->second.pages[(address-found->first)/page]:found->second.size);
         } else if constexpr(Ordinal==182) {
             const auto found=allocation(argument(cpu,0));
             if(found==allocations.end() || argument(cpu,1)>found->second.size) throw NativeBoundary(cpu.eip,"protection change outside a guest allocation");
-            const auto first=((argument(cpu,0)&0x0FFFFFFF)-found->first)/page;
-            const auto last=align_up((argument(cpu,0)&0x0FFFFFFF)-found->first+argument(cpu,1),page)/page;
+            const auto address=argument(cpu,0)>=0x80000000U?argument(cpu,0)&0x0FFFFFFFU:argument(cpu,0);
+            const auto first=(address-found->first)/page;
+            const auto last=align_up(address-found->first+argument(cpu,1),page)/page;
             if(last>found->second.pages.size()) throw NativeBoundary(cpu.eip,"protection change crosses a guest allocation");
             std::fill(found->second.pages.begin()+first,found->second.pages.begin()+last,argument(cpu,2)); finish(cpu,12);
-        } else if constexpr(Ordinal==173) finish(cpu,4,argument(cpu,0)&0x0FFFFFFFU);
+        } else if constexpr(Ordinal==173) {
+            const auto found=allocation(argument(cpu,0));
+            if(found!=allocations.end() && found->second.storage)
+                throw NativeBoundary(cpu.eip,"physical address requested for native pageable virtual memory");
+            finish(cpu,4,argument(cpu,0)&0x0FFFFFFFU);
+        }
         else if constexpr(Ordinal==217) {
             const auto base=argument(cpu,0),output=argument(cpu,1);
             const auto found=allocation(base);
             if(found==allocations.end()) { finish(cpu,8,invalid_parameter); return; }
-            const auto index=(base-found->first)/page,protect=found->second.pages[index];
+            const auto physical=base>=0x80000000U?base&0x0FFFFFFFU:base,alias=base>=0x80000000U?base&0xF0000000U:0U;
+            const auto index=(physical-found->first)/page,protect=found->second.pages[index];
             auto first=index,last=index+1;
             while(first && found->second.pages[first-1]==protect) --first;
             while(last<found->second.pages.size() && found->second.pages[last]==protect) ++last;
-            const std::uint32_t information[]={found->first+first*page,found->first,found->second.protect,(last-first)*page,
+            const std::uint32_t information[]={alias|(found->first+first*page),alias|found->first,found->second.protect,(last-first)*page,
                 static_cast<std::uint32_t>(protect?MEM_COMMIT:MEM_RESERVE),protect,MEM_PRIVATE};
             std::memcpy(memory.access(output,sizeof(information)),information,sizeof(information)); finish(cpu,8,success);
         } else if constexpr(Ordinal==291) {
@@ -2538,11 +2813,11 @@ struct Xbox::State {
         }
         result.entry_returned=entry_returned; result.main_reached=diagnostic.reached_watch;result.apcs_delivered=apcs_delivered;
         result.io.assign(io_trace.begin(),io_trace.end());
-        if(!live) {
+        result.last_failed_allocation=last_failed_allocation;
+        if(!live || (!boundary.empty() && boundary!="Native window closed")) {
             result.allocations.reserve(allocations.size());
             for(const auto& [address,block]:allocations)
                 result.allocations.push_back({address,block.size,static_cast<std::uint32_t>(std::ranges::count_if(block.pages,[](auto protect){return protect!=0;})*page),block.protect});
-            result.last_failed_allocation=last_failed_allocation;
         }
         result.threads_created=static_cast<std::uint32_t>(threads.size());
         result.vblank_callbacks=vblank_callbacks;
@@ -2554,6 +2829,11 @@ struct Xbox::State {
         }
         result.boundary=boundary; result.diagnostic=diagnostic; result.service_calls=service_calls;
         if(current) { result.cpu=current->cpu; result.active_thread=current->id; }
+        if(!boundary.empty() && boundary!="Native window closed") {
+            try {result.failure_context=failure_report(result.cpu);}
+            catch(...) {result.failure_context="{\"error\":\"Failure context could not be collected\"}";}
+            diagnostic_record("{\"type\":\"failure_context\",\"context\":"+result.failure_context+'}');
+        }
         const auto stack=result.cpu.registers[esp];
         if(stack<ram.size()) {
             result.stack_word_count=static_cast<std::uint32_t>(std::min<std::size_t>(result.stack_words.size(),(ram.size()-stack)/4));
@@ -2569,6 +2849,258 @@ struct Xbox::State {
 };
 Xbox::Xbox(Xbe& image,Memory& memory,std::span<std::byte> ram,const std::filesystem::path& disc,XboxHost host):state_(std::make_unique<State>(image,memory,ram,disc,std::move(host))) {}
 Xbox::~Xbox()=default;
+std::string check_services(Xbe& image,const std::filesystem::path& disc,const std::filesystem::path& output) {
+    if(!image.supported() || std::filesystem::exists(output))
+        throw std::runtime_error("Service checks require the verified XBE and a fresh output directory");
+    std::filesystem::create_directories(output);
+    std::vector<std::byte> ram(64*1024*1024);
+    image.load(std::span(ram).subspan(image.base,image.image_size));Memory memory(0,ram);
+    XboxHost host;host.storage=output/"storage";
+    Xbox xbox(image,memory,ram,disc,std::move(host));auto& s=*xbox.state_;
+    Xbox::State::Thread issuer;issuer.host=&s;issuer.state=Xbox::State::ThreadState::running;s.current=&issuer;
+    const auto scratch=s.allocate(2*page,page,true,PAGE_READWRITE);
+    if(!scratch) throw std::runtime_error("Service diagnostic workspace allocation failed");
+    unsigned checks=0;
+    const auto require=[&](bool value,std::string_view name) {
+        ++checks;if(!value) throw std::runtime_error("Native service check failed: "+std::string(name));
+    };
+    const auto call=[&](unsigned ordinal,std::initializer_list<std::uint32_t> arguments) {
+        auto& cpu=issuer.cpu;cpu.kernel=&s.services;cpu.registers[esp]=scratch+0x800;cpu.eip=image.entry;
+        memory.store<std::uint32_t>(cpu.registers[esp],return_sentinel);
+        unsigned index=1;for(auto value:arguments) memory.store<std::uint32_t>(cpu.registers[esp]+index++*4,value);
+        s.services.entries.at(ordinal)(&s,cpu,memory);
+        require(cpu.eip==return_sentinel && cpu.registers[esp]==scratch+0x804+arguments.size()*4,"service return ABI");
+        return cpu.registers[eax];
+    };
+    constexpr std::string_view name="\\Device\\CdRom0\\default.xbe";
+    std::memcpy(memory.access(scratch+0x100,name.size()),name.data(),name.size());
+    memory.store<std::uint16_t>(scratch+0x80,static_cast<std::uint16_t>(name.size()));
+    memory.store<std::uint16_t>(scratch+0x82,static_cast<std::uint16_t>(name.size()));
+    memory.store<std::uint32_t>(scratch+0x84,scratch+0x100);
+    memory.store<std::uint32_t>(scratch+0x44,scratch+0x80); // Xbox OBJECT_ATTRIBUTES.ObjectName.
+    for(const auto access:std::array<std::uint32_t,3>{GENERIC_WRITE,GENERIC_ALL,FILE_ALL_ACCESS})
+        require(call(202,{scratch,access,scratch+0x40,scratch+0x20,1,0})==access_denied,"disc rejects generic and specific write access");
+    require(call(202,{scratch,GENERIC_READ,scratch+0x40,scratch+0x20,1,0})==success,"open asynchronous XISO file");
+    const auto file=memory.load<std::uint32_t>(scratch),file_object=s.handles.at(file).address;
+    require(call(211,{file,scratch+0x20,scratch+0x400,4,8})==success &&
+        memory.load<std::uint32_t>(scratch+0x400)==FILE_GENERIC_READ,"disc access query returns mapped generic-read rights");
+    require(call(189,{scratch+4,0,0,0})==success,"create completion event");
+    const auto event=memory.load<std::uint32_t>(scratch+4),event_object=s.handles.at(event).address;
+    require(s.dispatcher_owner(file_object+0x38)==file_object,"file wait retains enclosing FILE_OBJECT");
+    // Hold one public reference to inspect completion after closing both handles.
+    ++s.object_references[event_object];
+    require(call(219,{file,event,0,0,scratch+0x20,scratch+0x200,16,scratch+0x30})==0x103,"queue native read");
+    require(s.pending_io_count==1,"read remains pending until native completion is collected");
+    require(call(187,{file})==success && call(187,{event})==success,"close handles during read");
+    require(s.objects.contains(file_object) && s.object_references.at(file_object)==1 &&
+        s.object_references.at(event_object)==2,"pending read retains file and event objects");
+    require(call(189,{scratch+8,0,0,0})==success,"allocate another object during read");
+    const auto other=memory.load<std::uint32_t>(scratch+8),other_object=s.handles.at(other).address;
+    require(other_object!=file_object && other_object!=event_object,"pending object storage cannot be reused");
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+    while(s.pending_io_count && std::chrono::steady_clock::now()<deadline) {s.dispatch_io();if(s.pending_io_count) Sleep(1);}
+    require(!s.pending_io_count && memory.load<std::uint32_t>(scratch+0x20)==success &&
+        memory.load<std::uint32_t>(scratch+0x24)==16 && memory.load<std::uint32_t>(scratch+0x200)==0x48454258,
+        "native read returns original XBE bytes");
+    require(!s.objects.contains(file_object) && s.object_references.at(event_object)==1 &&
+        memory.load<std::uint32_t>(event_object+4)==1 && memory.load<std::uint32_t>(other_object+4)==0,
+        "completion signals its event and releases only its own objects");
+    --s.object_references.at(event_object);s.release_object(event_object);
+    require(!s.objects.contains(event_object),"event is freed after its final reference");
+    require(call(187,{other})==success,"close diagnostic object");
+    require(call(202,{scratch,GENERIC_EXECUTE,scratch+0x40,scratch+0x20,1,0x20})==success,"open execute-only disc file");
+    const auto execute_file=memory.load<std::uint32_t>(scratch);
+    require(call(211,{execute_file,scratch+0x20,scratch+0x400,4,8})==success &&
+        memory.load<std::uint32_t>(scratch+0x400)==FILE_GENERIC_EXECUTE,"disc maps generic-execute rights");
+    require(call(219,{execute_file,0,0,0,scratch+0x20,scratch+0x200,16,scratch+0x30})==access_denied,"execute access does not grant data reads");
+    require(call(187,{execute_file})==success,"close execute-only diagnostic file");
+    const std::array<std::array<std::uint32_t,4>,2> sharing_cases{{
+        {GENERIC_READ,0,GENERIC_EXECUTE,1},{GENERIC_EXECUTE,1,GENERIC_READ,0}}};
+    for(const auto& sharing:sharing_cases) {
+        require(call(202,{scratch,sharing[0],scratch+0x40,scratch+0x20,sharing[1],0x20})==success,"open disc sharing owner");
+        const auto owner=memory.load<std::uint32_t>(scratch);
+        require(memory.load<std::uint8_t>(s.handles.at(owner).address+2)==(2U|(sharing[1]<<4)),
+            "data and execution access both publish the shared-read flag");
+        require(call(202,{scratch+8,sharing[2],scratch+0x40,scratch+0x20,sharing[3],0x20})==0xC0000043,
+            "disc read and execute access honor sharing restrictions in both directions");
+        require(call(187,{owner})==success,"close disc sharing owner");
+    }
+    constexpr std::uint32_t metadata_access=FILE_READ_ATTRIBUTES|SYNCHRONIZE;
+    const std::array<std::array<std::uint32_t,4>,2> metadata_cases{{
+        {GENERIC_READ,0,metadata_access,7},{metadata_access,0,GENERIC_READ,0}}};
+    for(const auto& sharing:metadata_cases) {
+        require(call(202,{scratch,sharing[0],scratch+0x40,scratch+0x20,sharing[1],0x20})==success,"open metadata-sharing owner");
+        const auto owner=memory.load<std::uint32_t>(scratch);
+        require(call(202,{scratch+8,sharing[2],scratch+0x40,scratch+0x20,sharing[3],0x20})==success,
+            "metadata-only opens neither acquire nor conflict with data-sharing restrictions");
+        const auto other_handle=memory.load<std::uint32_t>(scratch+8),metadata=sharing[0]==metadata_access?owner:other_handle;
+        require(memory.load<std::uint8_t>(s.handles.at(metadata).address+2)==0,"metadata-only opens publish no data/share flags");
+        require(call(187,{owner})==success && call(187,{other_handle})==success,"close metadata-sharing diagnostic files");
+    }
+    for(const auto options:{0x20U,0x28U,8U}) {
+        require(call(202,{scratch,GENERIC_READ|SYNCHRONIZE,scratch+0x40,scratch+0x20,1,options})==success,"open transfer diagnostic file");
+        const auto handle=memory.load<std::uint32_t>(scratch);
+        memory.store<std::uint64_t>(scratch+0x30,0);
+        require(call(219,{handle,0,0,0,scratch+0x20,scratch+0x1000,16,scratch+0x30})==
+            (options&8?invalid_parameter:success),"unbuffered length validation is independent of synchronous mode");
+        if(options&0x20) {
+            require(memory.load<std::uint32_t>(scratch+0x24)==(options&8?0U:16U),"rejected transfer reports zero bytes");
+            require(call(219,{handle,0,0,0,scratch+0x20,scratch+0x1000,2048,scratch+0x30})==success &&
+                memory.load<std::uint32_t>(scratch+0x1000)==0x48454258,"aligned synchronous read returns original XBE bytes");
+            memory.store<std::uint64_t>(scratch+0x30,1);
+            require(call(219,{handle,0,0,0,scratch+0x20,scratch+0x1000,2048,scratch+0x30})==
+                (options&8?invalid_parameter:success),"synchronous offset alignment follows the open mode");
+            require(call(226,{handle,scratch+0x20,scratch+0x30,8,14})==
+                (options&8?invalid_parameter:success),"file-position alignment follows the open mode");
+            if(options&8) require(s.handles.at(handle).file->position==2048,"invalid read and seek retain the current position");
+        }
+        require(call(187,{handle})==success,"close transfer diagnostic file");
+    }
+    constexpr std::string_view writable="\\Device\\Harddisk0\\Partition1\\alignment.bin";
+    std::memcpy(memory.access(scratch+0x100,writable.size()),writable.data(),writable.size());
+    memory.store<std::uint16_t>(scratch+0x80,static_cast<std::uint16_t>(writable.size()));
+    memory.store<std::uint16_t>(scratch+0x82,static_cast<std::uint16_t>(writable.size()));
+    require(call(190,{scratch,GENERIC_READ|GENERIC_WRITE|SYNCHRONIZE,scratch+0x40,scratch+0x20,0,0,0,2,0x28})==success,
+        "create unbuffered native storage file");
+    const auto writable_handle=memory.load<std::uint32_t>(scratch);
+    require(call(211,{writable_handle,scratch+0x20,scratch+0x400,4,8})==success &&
+        memory.load<std::uint32_t>(scratch+0x400)==(FILE_GENERIC_READ|FILE_GENERIC_WRITE),"native files use mapped read/write rights");
+    memory.store<std::uint64_t>(scratch+0x30,0);
+    require(call(236,{writable_handle,0,0,0,scratch+0x20,scratch+0x1000,16,scratch+0x30})==invalid_parameter &&
+        s.file_size(*s.handles.at(writable_handle).file)==0,"invalid synchronous write leaves the file empty");
+    require(call(236,{writable_handle,0,0,0,scratch+0x20,scratch+0x1000,512,scratch+0x30})==success &&
+        memory.load<std::uint32_t>(scratch+0x24)==512,"native storage accepts its 512-byte sector size");
+    memory.store<std::uint64_t>(scratch+0x30,1);
+    require(call(236,{writable_handle,0,0,0,scratch+0x20,scratch+0x1000,512,scratch+0x30})==invalid_parameter &&
+        s.file_size(*s.handles.at(writable_handle).file)==512,"invalid write offset leaves the file size intact");
+    const auto native_path=s.handles.at(writable_handle).file->host_path;
+    require(call(187,{writable_handle})==success,"close native storage diagnostic file");
+    const auto reference=CreateFileW(native_path.c_str(),GENERIC_ALL,7,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,nullptr);
+    const auto full_access_status=reference==INVALID_HANDLE_VALUE?file_error(GetLastError()):success;
+    if(reference!=INVALID_HANDLE_VALUE) CloseHandle(reference);
+    require(call(202,{scratch,GENERIC_ALL,scratch+0x40,scratch+0x20,7,0x20})==full_access_status,
+        "full-access native open matches the host's permission result");
+    if(full_access_status==success) {
+        const auto full_access_file=memory.load<std::uint32_t>(scratch);
+        require(call(211,{full_access_file,scratch+0x20,scratch+0x400,4,8})==success &&
+            memory.load<std::uint32_t>(scratch+0x400)==FILE_ALL_ACCESS &&
+            memory.load<std::uint8_t>(s.handles.at(full_access_file).address+2)==0x7E,
+            "native full access reports mapped rights and packed access/share flags");
+        require(call(187,{full_access_file})==success,"close full-access native file");
+    }
+    std::filesystem::path append_path;
+    for(const auto options:{0x20U,0U}) {
+        require(call(202,{scratch,4U|SYNCHRONIZE,scratch+0x40,scratch+0x20,1,options})==success,"open append-only native file");
+        const auto handle=memory.load<std::uint32_t>(scratch);
+        auto& append_file=*s.handles.at(handle).file;append_path=append_file.host_path;
+        const auto previous_size=s.file_size(append_file);
+        memory.store<std::uint64_t>(scratch+0x30,0);
+        require(call(236,{handle,0,0,0,scratch+0x20,scratch+0x1000,4,scratch+0x30})==(options?success:0x103),
+            "append-only writes ignore a supplied zero offset");
+        const auto due=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+        while(s.pending_io_count && std::chrono::steady_clock::now()<due) {s.dispatch_io();if(s.pending_io_count) Sleep(1);}
+        require(!s.pending_io_count && memory.load<std::uint32_t>(scratch+0x20)==success &&
+            memory.load<std::uint32_t>(scratch+0x24)==4 && s.file_size(append_file)==previous_size+4,
+            "append completion extends the file by exactly its payload");
+        if(options) require(call(211,{handle,scratch+0x20,scratch+0x400,8,14})==success &&
+            memory.load<std::uint64_t>(scratch+0x400)==previous_size+4 &&
+            memory.load<std::uint64_t>(s.handles.at(handle).address+0x14)==previous_size+4,
+            "synchronous append publishes its actual ending position");
+        require(call(187,{handle})==success,"close append-only diagnostic file");
+    }
+    File appended(append_path);const auto prefix=appended.read(0,4),suffix=appended.read(512,8);
+    require(appended.size()==520 && u32(prefix,0)==0x48454258 && u32(suffix,0)==0x48454258 && u32(suffix,4)==0x48454258,
+        "append-only writes preserve the XISO-derived prefix and add both payloads at the end");
+    const auto allocation_count=s.allocations.size();
+    require(call(167,{UINT32_MAX,PAGE_READWRITE})==0 && call(165,{UINT32_MAX})==0 &&
+        call(166,{UINT32_MAX,0,UINT32_MAX,page,PAGE_READWRITE})==0,"oversized native allocations return null");
+    memory.store<std::uint32_t>(scratch+0x14,0);memory.store<std::uint32_t>(scratch+0x18,UINT32_MAX);
+    require(call(184,{scratch+0x14,0,scratch+0x18,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE})==no_memory &&
+        s.allocations.size()==allocation_count,"oversized virtual allocation returns failure without changing allocations");
+    memory.store<std::uint32_t>(scratch+0x18,2*page);
+    require(call(184,{scratch+0x14,0,scratch+0x18,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE})==success,"allocate virtual diagnostic pages");
+    const auto virtual_base=memory.load<std::uint32_t>(scratch+0x14);
+    memory.store<std::uint32_t>(scratch+0x14,virtual_base|0x80000000U);memory.store<std::uint32_t>(scratch+0x18,0);
+    require(call(199,{scratch+0x14,scratch+0x18,MEM_DECOMMIT})==invalid_parameter,"reject an aliased virtual decommit address");
+    memory.store<std::uint32_t>(scratch+0x14,virtual_base);memory.store<std::uint32_t>(scratch+0x18,UINT32_MAX);
+    require(call(199,{scratch+0x14,scratch+0x18,MEM_DECOMMIT})==invalid_parameter &&
+        s.allocations.at(virtual_base).pages==std::vector<std::uint32_t>(2,PAGE_READWRITE),"reject a decommit range before rounding or changing pages");
+    memory.store<std::uint32_t>(scratch+0x18,page);
+    require(call(199,{scratch+0x14,scratch+0x18,MEM_DECOMMIT})==success &&
+        s.allocations.at(virtual_base).pages==std::vector<std::uint32_t>{0,PAGE_READWRITE},"valid decommit affects only its selected page");
+    memory.store<std::uint32_t>(scratch+0x18,0);
+    require(call(199,{scratch+0x14,scratch+0x18,MEM_RELEASE})==success &&
+        s.allocations.size()==allocation_count,"release the virtual diagnostic reservation");
+    memory.store<std::uint32_t>(scratch+0x14,0);memory.store<std::uint32_t>(scratch+0x18,static_cast<std::uint32_t>(ram.size()));
+    require(call(184,{scratch+0x14,0,scratch+0x18,MEM_RESERVE,PAGE_READWRITE})==success,
+        "virtual address reservations do not consume physical RAM");
+    memory.store<std::uint32_t>(scratch+0x18,0);
+    require(call(199,{scratch+0x14,scratch+0x18,MEM_RELEASE})==success,"release uncommitted virtual address space");
+    const auto available_before=s.available_memory();
+    std::vector<std::uint32_t> fragments;
+    while(const auto address=s.allocate(256*1024,page,true,PAGE_READWRITE)) fragments.push_back(address);
+    for(unsigned i=0;i<fragments.size();i+=2) s.release_allocation(fragments[i]);
+    constexpr std::uint32_t baseball_size=1406976;
+    require(s.memory_status().largest_free<baseball_size && s.available_memory()>baseball_size,
+        "fragmented physical pool retains enough total memory for the Baseball allocation");
+    auto& allocator_cpu=issuer.cpu;allocator_cpu.registers[esp]=scratch+0x800;
+    memory.store<std::uint32_t>(scratch+0x800,return_sentinel);
+    const std::array virtual_arguments{0U,baseball_size,MEM_COMMIT|memory_nozero,std::uint32_t(PAGE_READWRITE)};
+    for(unsigned i=0;i<virtual_arguments.size();++i) memory.store<std::uint32_t>(scratch+0x804+i*4,virtual_arguments[i]);
+    invoke_native(allocator_cpu,memory,0x00305F67);
+    const auto baseball=allocator_cpu.registers[eax];
+    require(baseball && allocator_cpu.eip==return_sentinel && allocator_cpu.registers[esp]==scratch+0x814,
+        "original VirtualAlloc satisfies Baseball's request despite physical fragmentation");
+    memory.store<std::uint32_t>(baseball,0x12345678);memory.store<std::uint32_t>(baseball+page,0x87654321);
+    memory.store<std::uint32_t>(baseball+baseball_size-4,0xABCDEF01);
+    require(memory.load<std::uint32_t>(baseball+baseball_size-4)==0xABCDEF01,"entire virtual allocation is readable and writable");
+    memory.store<std::uint32_t>(scratch+0x14,baseball);memory.store<std::uint32_t>(scratch+0x18,page);
+    require(call(199,{scratch+0x14,scratch+0x18,MEM_DECOMMIT})==success,"decommit virtual backing without releasing its address");
+    bool inaccessible=false;try {memory.load<std::uint32_t>(baseball);} catch(const std::runtime_error&) {inaccessible=true;}
+    require(inaccessible && memory.load<std::uint32_t>(baseball+page)==0x87654321,"decommit removes only the selected readable mapping");
+    require(call(184,{scratch+0x14,0,scratch+0x18,MEM_COMMIT,PAGE_READWRITE})==success &&
+        memory.load<std::uint32_t>(baseball)==0 && memory.load<std::uint32_t>(baseball+page)==0x87654321 &&
+        memory.access(baseball,baseball_size),"recommit zeroes new backing and joins adjacent native spans");
+    memory.store<std::uint32_t>(scratch+0x18,0);
+    require(call(199,{scratch+0x14,scratch+0x18,MEM_RELEASE})==success,"release Baseball's virtual allocation");
+    for(unsigned i=1;i<fragments.size();i+=2) s.release_allocation(fragments[i]);
+    require(s.available_memory()==available_before && s.allocations.size()==allocation_count,"fragmentation diagnostic releases all memory");
+    memory.store<std::uint32_t>(scratch+0x14,0);memory.store<std::uint32_t>(scratch+0x18,static_cast<std::uint32_t>(ram.size()));
+    require(call(184,{scratch+0x14,0,scratch+0x18,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE})==no_memory &&
+        s.allocations.size()==allocation_count,"virtual commitment still respects the 64 MiB physical budget");
+    memory.store<std::uint32_t>(scratch+0x14,0x10000000);memory.store<std::uint32_t>(scratch+0x18,3*page);
+    require(call(184,{scratch+0x14,0,scratch+0x18,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE})==success &&
+        call(217,{0x10000000,scratch+0x300})==success && memory.load<std::uint32_t>(scratch+0x300)==0x10000000,
+        "virtual addresses retain their high bits in allocation and query operations");
+    memory.store<std::uint32_t>(0x10000000,0x11223344);memory.store<std::uint32_t>(0x10002000,0x55667788);
+    memory.store<std::uint32_t>(scratch+0x14,0x10001000);memory.store<std::uint32_t>(scratch+0x18,page);
+    require(call(199,{scratch+0x14,scratch+0x18,MEM_DECOMMIT})==success &&
+        call(184,{scratch+0x14,0,scratch+0x18,MEM_COMMIT,PAGE_READWRITE})==success &&
+        memory.access(0x10000000,3*page) && memory.load<std::uint32_t>(0x10000000)==0x11223344 &&
+        memory.load<std::uint32_t>(0x10001000)==0 && memory.load<std::uint32_t>(0x10002000)==0x55667788,
+        "recommit joins both adjacent spans without changing their bytes");
+    memory.store<std::uint32_t>(scratch+0x14,0x10000000);memory.store<std::uint32_t>(scratch+0x18,0);
+    require(call(199,{scratch+0x14,scratch+0x18,MEM_RELEASE})==success && s.available_memory()==available_before,
+        "release of a high virtual address restores committed memory");
+    const auto mapped=call(167,{2*page,PAGE_READWRITE});
+    require(mapped>=0x80000000U,"allocate mapped system memory");
+    for(const auto alias:{0x10000000U,0x70000000U,0xA0000000U,0xC0000000U}) {
+        const auto address=(mapped&0x0FFFFFFFU)|alias;
+        require(call(217,{address,scratch+0x300})==invalid_parameter &&
+            call(180,{address})==0,"unmapped address prefixes cannot identify an allocation");
+    }
+    for(const auto alias:{0U,0x80000000U,0xF0000000U}) {
+        const auto base=(mapped&0x0FFFFFFFU)|alias;
+        require(call(217,{base+page,scratch+0x300})==success,"query mapped allocation");
+        require(memory.load<std::uint32_t>(scratch+0x300)==base && memory.load<std::uint32_t>(scratch+0x304)==base &&
+            memory.load<std::uint32_t>(scratch+0x30C)==2*page && memory.load<std::uint32_t>(scratch+0x314)==PAGE_READWRITE,
+            "memory query retains region bounds and the requested address alias");
+    }
+    require(call(172,{mapped,2*page})==2,"release mapped diagnostic allocation");
+    s.current=nullptr;
+    const auto result=std::format("{{\"format\":\"smbd-services-check-v1\",\"passed\":true,\"sha256\":{},\"game_booted\":false,\"audio_device_opened\":false,\"host_full_access_allowed\":{},\"checks\":{}}}",json(image.sha256),full_access_status==success,checks);
+    write_text(output/"report.json",result+'\n',false);return result;
+}
 void Xbox::aspect_ratio(unsigned mode) {
     if(mode>2) throw std::runtime_error("Invalid game aspect ratio");
     auto& s=*state_;
@@ -2584,6 +3116,7 @@ void Xbox::aspect_ratio(unsigned mode) {
     s.memory.store<std::uint8_t>(0x6C934C,s.host.widescreen);
     s.memory.store<std::uint32_t>(0x402428,mode==2?std::bit_cast<std::uint32_t>(21.0f/9):0x3FE38E39U);
     s.memory.store<std::uint32_t>(0x40242C,mode==2?std::bit_cast<std::uint32_t>(480.0f*21/9):0x44555555U);
+    ui_canvas(s.memory,s.host.ultrawide);
     const float width=mode==2?480.0f*21/9:mode==1?480.0f*16/9:640.0f;
     s.memory.store<std::uint32_t>(0x482FC8,std::bit_cast<std::uint32_t>((width+1.0f/16)/8));
     // Verified original leaf routines refresh the canvas and all five camera aspects.
@@ -2633,6 +3166,18 @@ void Xbox::capture_frame(const std::filesystem::path& directory) {
         std::ofstream memory_file(directory/"guest-memory.bin",std::ios::binary);
         memory_file.exceptions(std::ios::failbit|std::ios::badbit);
         memory_file.write(reinterpret_cast<const char*>(s.ram.data()),static_cast<std::streamsize>(s.ram.size()));memory_file.close();
+        std::ofstream virtual_file(directory/"virtual-memory.bin",std::ios::binary);
+        virtual_file.exceptions(std::ios::failbit|std::ios::badbit);virtual_file.write("SMBDVM1\n",8);
+        for(const auto& [address,block]:s.allocations) if(block.storage) {
+            for(unsigned index=0;index<block.pages.size();) {
+                if(!block.pages[index]) {++index;continue;}
+                const auto first=index;while(index<block.pages.size() && block.pages[index]) ++index;
+                const std::array<std::uint32_t,2> range{address+first*page,(index-first)*page};
+                virtual_file.write(reinterpret_cast<const char*>(range.data()),sizeof(range));
+                virtual_file.write(reinterpret_cast<const char*>(block.storage.get()+first*page),range[1]);
+            }
+        }
+        constexpr std::array<std::uint32_t,2> end{};virtual_file.write(reinterpret_cast<const char*>(end.data()),sizeof(end));virtual_file.close();
         std::ostringstream output;
         output<<std::format("{{\"format\":\"smbd-game-state-v1\",\"phase\":\"capture_request\",\"source_sha256\":{},\"frame\":{},\"active_thread\":{},\"gpu_cursor\":{},\"memory\":{{\"base\":0,\"size\":{},\"data\":\"guest-memory.bin\"}},\"recent_io_enabled\":{},\"audio_muted\":{},\"threads\":[",
             json(s.image.sha256),s.gpu->stats().flips,s.current?s.current->id:0,json(hex32(s.gpu_cursor)),s.ram.size(),s.host.trace_io,s.host.mute_audio);

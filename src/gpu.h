@@ -33,6 +33,7 @@ public:
     void invalidate_memory(std::uint32_t address,std::uint32_t size);
     static std::string check_texture_cache();
     static std::string check_bump_mapping();
+    static std::string check_image_blit(const std::filesystem::path&,bool warp,bool debug,unsigned antialiasing=0,unsigned scale=1);
     void capture_frame(const std::filesystem::path&,std::string_view source_sha256);
     const FrameCaptureStatus& capture_status() const;
     void cancel_capture(std::string_view reason);

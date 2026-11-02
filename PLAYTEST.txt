@@ -31,6 +31,11 @@ Play.cmd follows the Audio settings; --mute always silences explicit checks.
 Optional report, from PowerShell in the project folder:
   .\Play.cmd --report build\logs\manual-playtest.json
 
+If the game stops with an error, send the new build/logs/game-stopped-*.json.
+It automatically includes recent mode changes, texture locks, memory allocation
+and release requests, allocation failures, and a bounded snapshot of nearby data.
+The linked session log and build date identify the run. No tracing flag is needed.
+
 Verified milestone: first-level GOAL and loading 1-2 DIAMOND.
 Remaining work: three unresolved indirect call sites, additional Xbox services, wider visual/timing
 accuracy and wider game-mode coverage. This is a playable prototype.

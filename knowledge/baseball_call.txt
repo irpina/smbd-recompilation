@@ -1,0 +1,102 @@
+Monkey Baseball UI draw callback, 2026-11-02
+
+Verified target and user failure
+  XBE SHA256 9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2
+  Native verify-disc matched the embedded executable in the original XISO.
+  Result: build/logs/baseball-call-disc.json.
+  User report: build/logs/game-stopped-1793640703208.json.
+  Boundary: Native boundary at 0x000F3AA0: call target is outside its verified table
+  Calling instruction 000770DB, FFD0 (CALL EAX), active thread 8.
+  EAX=000F3AA0, ESI=00729218, return address=000770DD.
+  Register memory confirms row+38 contains A03A0F00. The row is inside the
+  original D0-byte UI pool [007289F8,0072CAF8). This is an original callback,
+  not a pointer inferred solely from an observed call.
+  The supplied session reports zero memory-allocation failures and 16,809,984
+  available physical bytes. It has already passed the previous allocation fault.
+
+Root cause and original publication proof
+  The previous UI callback catalogue followed direct row pointers but omitted
+  a callback installed through an array of row pointers returned by 000ECB00.
+  The old caller guard correctly stopped a target absent from that catalogue.
+
+  ECB00's EAX is a count; its stack argument selects the initial array slot.
+  It uses the Baseball master pointer at 007700A4 and the pointer array at +338.
+  Every nonnull replacement element comes from original 736C0/73620, which
+  allocates and clears one row in the same 80-element UI pool. Its return value
+  points at the first selected pointer-array element, not at a row itself.
+
+  Original builder 000F3E40 supplies count 5 and initial slot 50. It advances the
+  returned pointer array by four bytes and loads its rows 1, 2 and 3. Instruction
+  000F3EC3 is B9A03A0F00 (MOV ECX,000F3AA0). ECX remains unchanged through:
+    000F3EC8  894E38  MOV [ESI+38],ECX
+    000F3EFE  894E38  MOV [ESI+38],ECX
+    000F3F36  894A38  MOV [EDX+38],ECX
+  These install the draw callback in three UI rows. The target word begins at
+  000F3EC4. The existing target_literals schema stores this original word's
+  address, not the callback value itself.
+
+  Independent native references locate exactly 34 direct ECB00 call sites.
+  Their 28 distinct indexed owner entries were analyzed in one bounded set,
+  at most 1024 instructions per owner; none exhausted its budget. Every call's
+  address, original bytes and ECB00 target match the corresponding owner CFG.
+  An inventory of all executable-address constants outside control transfers
+  in these builders contains only F3EC3's F3AA0 publication. The existing
+  width-aware UI header writer inventory also identifies all three stores.
+  This covers the missed construction family rather than admitting a target
+  just because it appeared in the report. No additional target was found there.
+
+  The new draw callback's CFG is complete: 46 new instructions plus the existing
+  17-instruction tail at 00074F10. It preserves ESI, reads its row argument,
+  configures the existing UI text functions and tail-jumps to 74F10. No new
+  unresolved call is introduced. Native analysis artifacts under build/logs:
+    baseball-call-target-references.json, baseball-call-target.json
+    baseball-ui-array.json, baseball-ui-array-references.json
+    baseball-ui-builder-entries.txt, baseball-ui-builders/
+    baseball-ui-builder-code-constants.json, baseball-ui-array-proof.json
+    baseball-ui-row-initializer.json, baseball-ui-row-factory.json
+
+Correction
+  Add only original source word 000F3EC4 to the 000770DB draw target group.
+  Native generation reads and verifies the target against the supported XBE.
+  The draw domain changes from 148 to 149 callbacks; its union with existing
+  cleanup/update methods changes from 334 to 335. Cleanup and update domains
+  retain their existing target lists. Update the shared proof descriptions to
+  identify the missing array indirection and distinguish the old audit artifacts
+  from this supplement. Keep the runtime switch's rejection of unknown targets.
+
+Native validation
+  The CPU diagnostic executes the original F3E40 builder, stopping at its later
+  F3B50 helper entry after the three stores. It checks each original row's +38,
+  then invokes original 77080 and stops at the callback entry before rendering.
+  All three calls must reach F3AA0 with stack return address 770DD and the exact
+  row argument. An unrelated compiled function (73900) must remain rejected.
+
+  Before: this reproduces the exact user boundary, not just a synthetic table
+  lookup. baseball-call-reproduced.json records the failure. The earlier
+  baseball-call-before.json attempted a breakpoint at a non-checkpoint instruction
+  and is superseded by that reproduction.
+  After: all 22 CPU cases pass, including the three real publications and calls
+  and the negative guard check. baseball-call-after.json.
+  Native before/after analysis of 77080 proves exactly F3AA0 was added, no existing
+  callback was removed, and no unrelated compiled function was admitted.
+  baseball-call-target-comparison.json.
+  Analysis/Game stages and the diagnostics executable build with one worker:
+  10,629 original functions compiled; zero unresolved call sites. Existing profile
+  counts for the changed 77080 control flow are discarded by LLVM as expected;
+  this is not a performance-acceptance measurement.
+  Native service checks: 196, including the previous allocation regression.
+  Bowling copy checks at 3x resolution/MSAA 4x: 14, passed with clean D3D11
+  validation. Existing 370-draw replay at MSAA 4x/AF 16x: zero changed RGB pixels,
+  no D3D11 errors. These are saved recomp images, not original-Xbox parity claims.
+  No game session or computer-use control was launched for this fix, respecting
+  the user's manual gameplay-testing preference. Full Baseball play remains a
+  manual check; the focused case proves publication and dispatch into the body.
+  Prior memory and Bowling fixes are retained. git diff --check passes.
+  Final aggregate: build/logs/baseball-call-validation.json.
+
+Independent instruction contract
+  Intel 64 and IA-32 Software Developer's Manual, Volume 2, CALL:
+  https://cdrdv2-public.intel.com/835757/325383-sdm-vol-2abcd.pdf
+  FFD0 calls the address in EAX and saves the following instruction address.
+  This independently confirms the target and return-stack interpretation used
+  by the original-byte proof and native diagnostic.

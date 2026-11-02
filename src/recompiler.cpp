@@ -317,6 +317,105 @@ public:
         body << label(instruction.address) << ": { // " << instruction.text << '\n';
         if(loop_headers.contains(instruction.address))
             body << "    if(smbd::checkpoint_due(cpu)) { commit(); smbd::checkpoint(cpu," << constant(instruction.address) << "); }\n";
+        if(instruction.address==0x1482AE) {
+            if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="57")
+                throw std::runtime_error("Original depth rectangle setup differs");
+            // 148290 clears a camera-space rectangle through a depth-only
+            // quad. Convert the legacy pixel-centre bounds to pixel edges,
+            // rounding outward on the NV2A grid so scaled MSAA samples cannot
+            // retain the old depth along the rectangle's perimeter.
+            for(const auto reg:{0U,1U,2U,4U}) used.insert(reg);
+            dirty.insert(1);dirty.insert(2);floating=true;
+            body << "    const auto status=_mm_getcsr();\n"
+                "    const auto device=memory.load<std::uint32_t>(0x32B6A8U);\n"
+                "    const auto width=memory.load<std::uint32_t>(device+0xEE8),height=memory.load<std::uint32_t>(device+0xEEC);\n"
+                "    const auto px=std::bit_cast<float>(memory.load<std::uint32_t>(0x6DDF28U));\n"
+                "    const auto py=std::bit_cast<float>(memory.load<std::uint32_t>(0x6DDF3CU));\n"
+                "    const float w=memory.load<std::uint32_t>(0x6DE0D4U)==0?-std::bit_cast<float>(eax):1.0f;\n"
+                "    if(width && height && px!=0 && py!=0 && w>0) {\n"
+                "        const auto dx=2*w/(px*width),dy=2*w/(py*height);\n"
+                "        const auto x0=std::bit_cast<float>(memory.load<std::uint32_t>(esp+0x18)),x1=std::bit_cast<float>(edx);\n"
+                "        const auto y0=std::bit_cast<float>(ecx),y1=std::bit_cast<float>(cpu.floating.xmm[0][0]);\n"
+                "        if(x0!=x1 && y0!=y1) {\n"
+                "        const bool left=(x0<x1)==(dx>0),top=(y0>y1)==(dy>0);\n"
+                "        memory.store<std::uint32_t>(esp+0x18,std::bit_cast<std::uint32_t>(x0-dx*(left?0.5625f:0.4375f)));\n"
+                "        edx=std::bit_cast<std::uint32_t>(x1-dx*(left?0.4375f:0.5625f));\n"
+                "        ecx=std::bit_cast<std::uint32_t>(y0+dy*(top?0.5625f:0.4375f));\n"
+                "        cpu.floating.xmm[0][0]=std::bit_cast<std::uint32_t>(y1+dy*(top?0.4375f:0.5625f));\n"
+                "        }\n"
+                "    }\n    _mm_setcsr(status);\n";
+        }
+        // Keep the minimap's local 16:9 camera and map its entire viewport to
+        // the wider display, anchored at the right edge. Its queued sprites
+        // must use the same mapping as its 3D image and stencil frame.
+        const bool map_view=instruction.address==0x58C3A || instruction.address==0x58F1C || instruction.address==0x59636;
+        const bool map_clip=instruction.address==0x58C52 || instruction.address==0x58F2D || instruction.address==0x5964C;
+        const bool map_sprite=instruction.address==0x59350 || instruction.address==0x594FA;
+        const bool hud_scale=instruction.address==0x74EC6 || instruction.address==0x3D707 || instruction.address==0x3DBA7 ||
+            instruction.address==0x3DE9D || instruction.address==0x3E286;
+        if(map_view || map_clip || map_sprite || hud_scale) {
+            const auto target=map_view?0x31790U:map_clip?0x23940U:map_sprite?0x75400U:0x28E40U;
+            if(ins.mnemonic!=ZYDIS_MNEMONIC_CALL || ins.length!=5 || instruction.target()!=target)
+                throw std::runtime_error("Original HUD layout call differs");
+            used.insert(4);
+            body << "    if(cpu.ultrawide) { const auto status=_mm_getcsr();\n";
+            if(hud_scale) {
+                body << "    float scale=4.0f/7;\n";
+                if(instruction.address==0x74EC6) body <<
+                    // 74E70 saves the sprite caller's ESI below its XYZ scale
+                    // arguments. Minimap arrows already include the original
+                    // 16:9 artwork scale; apply only the extra viewport scale,
+                    // after their rotation, through the native anchor matrix.
+                    "    if(memory.load<std::uint32_t>(esp+16)==0x7550FU) {\n"
+                    "        const auto sprite=memory.load<std::uint32_t>(esp+12);\n"
+                    "        if(memory.load<std::uint32_t>(sprite)==0x500U && memory.load<std::uint32_t>(sprite+0x34)==0x102000AU) scale=16.0f/21;\n"
+                    "    }\n";
+                body << "    memory.store<std::uint32_t>(esp,std::bit_cast<std::uint32_t>(scale));\n";
+            }
+            else if(map_sprite) body <<
+                "    const auto sprite=memory.load<std::uint32_t>(esp);\n"
+                "    const auto x=640.0f+(std::bit_cast<float>(memory.load<std::uint32_t>(sprite+4))-640.0f)*(16.0f/21);\n"
+                "    memory.store<std::uint32_t>(sprite+4,std::bit_cast<std::uint32_t>(x));\n"
+                "    memory.store<std::uint32_t>(sprite+0x34,memory.load<std::uint32_t>(sprite+0x34)|0x1000000U);\n"
+                "    memory.store<std::uint16_t>(sprite+0x40,static_cast<std::uint16_t>(static_cast<std::int32_t>(x)));\n";
+            else if(map_view) body <<
+                "    const float width=memory.load<std::uint16_t>(memory.load<std::uint32_t>(0x6DD520U)+4);\n"
+                "    memory.store<std::uint32_t>(esp,std::bit_cast<std::uint32_t>(std::round(width+\n"
+                "        (std::bit_cast<float>(memory.load<std::uint32_t>(esp))-width)*(16.0f/21))));\n"
+                "    memory.store<std::uint32_t>(esp+8,std::bit_cast<std::uint32_t>(\n"
+                "        std::round(std::bit_cast<float>(memory.load<std::uint32_t>(esp+8))*(16.0f/21))));\n";
+            else body <<
+                "    const float width=memory.load<std::uint16_t>(memory.load<std::uint32_t>(0x6DD520U)+4);\n"
+                "    const auto left=memory.load<std::uint32_t>(esp),size=memory.load<std::uint32_t>(esp+8);\n"
+                "    const auto x=static_cast<std::uint32_t>(width+(float(left)-width)*(16.0f/21));\n"
+                "    const auto right=static_cast<std::uint32_t>(std::ceil(width+(float(left)+size-width)*(16.0f/21)));\n"
+                "    memory.store<std::uint32_t>(esp,x);memory.store<std::uint32_t>(esp+8,right-x);\n";
+            body << "    _mm_setcsr(status); }\n";
+        }
+        if(instruction.address==0x7550A && (ins.mnemonic!=ZYDIS_MNEMONIC_CALL || ins.length!=5 || instruction.target()!=0x74E70U))
+            throw std::runtime_error("Original sprite anchor ABI differs");
+        constexpr std::pair<std::uint32_t,std::uint32_t> screen_copy_corners[]={{0x5B772,0x5B77B},{0x5B7CB,0x5B7D7},
+            {0x5B823,0x5B832},{0x5B882,0x5B88E}};
+        for(unsigned corner=0;corner<4;++corner) {
+            const auto [position,uv]=screen_copy_corners[corner];
+            if(instruction.address!=position && instruction.address!=uv) continue;
+            const bool coordinates=instruction.address==position;
+            if(ins.mnemonic!=ZYDIS_MNEMONIC_CALL || ins.length!=5 || instruction.target()!=(coordinates?0x313E0U:0x31430U))
+                throw std::runtime_error("Original full-screen copy vertex signature differs");
+            // 5B570 copies the entire scene in pixel coordinates. Account for
+            // its D3D8 pixel origin and cover all scaled MSAA samples. After
+            // NV2A snapping these edges are -1/32 and extent+1/32; extend UVs
+            // by the same amount so the saved scene still maps pixel for pixel.
+            used.insert(4);
+            if(!coordinates) body << "    const auto screen=memory.load<std::uint32_t>(0x6DD520U);\n";
+            for(unsigned axis=0;axis<2;++axis) {
+                const bool high=axis?corner>=2:corner==1 || corner==2;
+                const auto change=coordinates?(high?"-0.4375f":"-0.5625f"):
+                    std::format("{}1.0f/(32*memory.load<std::uint16_t>(screen+{}))",high?"":"-",axis?6:4);
+                body << "    memory.store<std::uint32_t>(esp+" << axis*4 << ",std::bit_cast<std::uint32_t>("
+                    "std::bit_cast<float>(memory.load<std::uint32_t>(esp+" << axis*4 << "))+(" << change << ")));\n";
+            }
+        }
         if(instruction.address==0x76FB9) {
             if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="E842E4FFFF" || instruction.target()!=0x75400)
                 throw std::runtime_error("Original screen-fade sprite signature differs");
@@ -763,20 +862,6 @@ public:
                 used.insert(4);
                 value="((memory.load<std::uint32_t>(memory.load<std::uint32_t>(esp+4)+0x128)&1)?smbd::frame_gain(cpu.floating,"+value+"):"+value+')';
             }
-            if(instruction.address==0x31563 || instruction.address==0x3157B) {
-                const auto expected=instruction.address==0x31563?"F30F110528DF6D00":"F30F110D34DF6D00";
-                if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!=expected)
-                    throw std::runtime_error("Original orthographic projection signature changed");
-                // Mode 1 stores the orthographic X scale and offset. Preserve
-                // the native 16:9 canvas while widening its projection to 21:9.
-                // Perspective cameras use the game's aspect setting instead.
-                body << "    if(cpu.ultrawide) { const auto status=_mm_getcsr();\n";
-                vector_write(operands[0],"_mm_mul_ss("+value+",_mm_set_ss(16.0f/21))",true);
-                body << "    _mm_setcsr(status); } else {\n";
-                vector_write(operands[0],value,true);
-                body << "    }\n";
-                break;
-            }
             if (scalar && operands[0].type==ZYDIS_OPERAND_TYPE_REGISTER && operands[1].type==ZYDIS_OPERAND_TYPE_REGISTER)
                 value="_mm_move_ss("+vector(operands[0])+','+value+')';
             vector_write(operands[0],value,scalar); break;
@@ -972,8 +1057,17 @@ public:
         case ZYDIS_MNEMONIC_PUSH: {
             const auto width = ins.operand_width;
             if (width != 16 && width != 32) throw std::runtime_error("Unsupported push width");
+            auto value=read(operands[0]);
+            if(instruction.address==0x6A206) {
+                if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="68ABAAAA3F")
+                    throw std::runtime_error("Original perspective UI aspect differs");
+                // These UI sprites already contain the native 16:9 layout.
+                // Widen their separate 4:3 perspective by 21/16, matching
+                // the orthographic HUD without changing scene cameras.
+                value="(cpu.ultrawide?0x3FE00000U:"+value+")";
+            }
             used.insert(4); dirty.insert(4);
-            body << "    const auto value = " << read(operands[0]) << ";\n    esp -= " << width / 8
+            body << "    const auto value = " << value << ";\n    esp -= " << width / 8
                  << "U;\n    memory.store<" << type(width) << ">(esp, static_cast<" << type(width) << ">(value));\n";
             break;
         }
@@ -1004,6 +1098,13 @@ public:
             if (ins.operand_width != 32 || operands[0].type==ZYDIS_OPERAND_TYPE_POINTER)
                 throw std::runtime_error("Only 32-bit near native calls are supported");
             calls = restores = true;
+            const bool map_aspect=instruction.address==0x58BDF || instruction.address==0x58D3A || instruction.address==0x58D55 ||
+                instruction.address==0x58F5B || instruction.address==0x58F80;
+            if(map_aspect) {
+                if(ins.length!=5 || instruction.target()!=0xADDC0U) throw std::runtime_error("Original minimap aspect call differs");
+                body << "    const auto aspect=memory.load<std::uint32_t>(0x73F0ECU);\n"
+                    "    if(cpu.ultrawide) memory.store<std::uint32_t>(0x73F0ECU,0x3FE38E39U);\n";
+            }
             const bool indirect=!instruction.target() && !instruction.kernel_ordinal;
             if(indirect) body << "    const auto target=" << read(operands[0]) << ";\n";
             used.insert(4); dirty.insert(4);
@@ -1023,6 +1124,7 @@ public:
             body << "    if (cpu.eip != " << constant(next)
                  << ") throw std::runtime_error(\"Unexpected return from call at " << hex32(instruction.address) << "\");\n"
                  << "    restore();\n";
+            if(map_aspect) body << "    if(cpu.ultrawide) memory.store<std::uint32_t>(0x73F0ECU,aspect);\n";
             break;
         }
         case ZYDIS_MNEMONIC_RDTSC:
@@ -1260,7 +1362,7 @@ LoweredFunction lower(const Function& function) {
         smbd::sign_extend<8>(memory.load<std::uint8_t>(0x7289F8+index*0xD0+15))==needle) break;
     cpu.registers[smbd::eax]=index<80?0x7289F8+index*0xD0:0;
     cpu.registers[smbd::ecx]=index;cpu.registers[smbd::edx]=status+index;
-    cpu.flags=smbd::logic_flags<32>(cpu.flags,0);
+    cpu.flags=index<80?smbd::sub_flags<32>(cpu.flags,needle,needle):smbd::logic_flags<32>(cpu.flags,0);
     cpu.eip=memory.load<std::uint32_t>(stack);cpu.registers[smbd::esp]=stack+4;
 }
 )";

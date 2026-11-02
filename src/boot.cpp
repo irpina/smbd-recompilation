@@ -70,6 +70,7 @@ std::string boot_report(const Xbe& image,const BootResult& result) {
                << ",\"eip\":" << json(hex32(thread.eip)) << ",\"state\":" << json(thread.state)
                << ",\"optional_callback_record\":" << json(hex32(thread.optional_callback_record)) << '}';
     }
-    return output.str()+"]}";
+    output << "],\"failure_context\":" << (result.failure_context.empty()?"null":result.failure_context);
+    return output.str()+"}";
 }
 }

@@ -170,6 +170,7 @@ std::vector<const Instruction*> callback_pushes(const Function& function,std::ui
 }
 
 bool callback_preserves_target(Xbe& image,std::uint32_t target,int reg,std::uint32_t site=0) {
+    if(reg<0 || reg>=8) return false;
     // Empty original callbacks preserve every general register except ESP.
     // Prove this from the instruction itself instead of requiring a contract
     // at each call to the game's shared no-op callback.
@@ -188,6 +189,7 @@ bool callback_preserves(Xbe& image,const Instruction& call,int reg) {
 }
 constexpr std::uint32_t kernel_preserved_registers=232; // EBX/EBP/ESI/EDI; native normal-return ABI.
 bool value_preserved(Xbe& image,const Instruction& call,unsigned reg) {
+    if(reg>=8) return false;
     // Source recovery runs before final ordinal publication. A proved import
     // slot already carries the same native register contract at this point.
     const bool kernel=call.kernel_ordinal || (call.source_slot && image.kernel_import(*call.source_slot));

@@ -1,0 +1,55 @@
+Golf pause-background coverage (2026-11-02)
+
+Verified USA XBE SHA-256:
+9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2
+build/logs/golf-pause-disc.json verifies the installed executable against the XISO.
+
+Capture: build/captures/frame-1793642757414-699773277100, 62 draws,
+3x native resolution, MSAA4, anisotropy16, presented at 16:9.
+Draw0 copies and darkens the paused Golf scene. The white lines are the target's
+white clear showing beyond that rectangle, rather than a separate overlay asset.
+
+Original pause path 00014C30 calls the shared whole-scene copy 0005B570 at
+00014CBC. The other original caller is 0023EDBF. Bounded executable analysis
+and a native CPU probe from the saved RAM/pageable-memory capture reproduce
+the original draw0 vertex payload byte for byte: (0,0) through (640,480),
+depth -1, UVs (0,0) through (1,1). Evidence:
+  build/logs/golf-pause-native-background.json
+  build/logs/golf-pause-copy-draw-references.json
+  build/logs/golf-pause-native-before-comparison.json
+
+The scene-copy producer omitted the legacy half-pixel screen-origin correction.
+The existing NV2A subpixel snapping and raster bias leave its upper/left edges
+inside the target. src/recompiler.cpp now corrects that producer's four position
+calls (0005B772, 0005B7CB, 0005B823, 0005B882) and four UV calls
+(0005B77B, 0005B7D7, 0005B832, 0005B88E). Each original call target/signature
+is checked during generation. Low positions subtract 0.5625; high positions
+subtract 0.4375. After snapping, the rectangle extends 1/32 pixel beyond each
+edge. Matching UV extensions of 1/(32*width) and 1/(32*height), using the
+original display dimensions, keep source texels aligned with destination pixels.
+The native before/after 804-byte packets differ only in those XY and UV words.
+No global geometry offset, clear-colour replacement or blending change is used.
+
+Offline validation on NVIDIA GeForce RTX 5060 Ti:
+- Rebuilt both release executables, 10629 compiled functions, no unresolved calls.
+- Restored read-only saved scene target127 from the capture's native-size PNG
+  into a derived replay texture. Before the fix this reproduces the captured
+  frame exactly (zero differing RGB pixels). The original capture is untouched.
+- Replayed all 62 draws with the corrected native CPU vertex payload and no
+  D3D11 errors: build/checks/golf-pause/corrected/frame.png.
+- An opaque source negative control reproduces 3361 incorrect perimeter pixels
+  with the original vertices. With corrected vertices, all 36864000 pixels in
+  16 native offscreen cases match their source exactly: scales1/2/3/4 crossed
+  with AA off/MSAA2/MSAA4/MSAA8. Zero RGB/alpha error, edge gaps or D3D11 errors.
+  build/checks/golf-pause/coverage-results.json
+- Existing CPU checks: 22 passed. Existing image-blit checks: 14 passed at
+  scale3/MSAA4. git diff --check passed. No gameplay session was launched.
+
+Reproduction helpers and reports are ignored under build/checks/golf-pause;
+aggregate report: build/logs/golf-pause-validation.json. These checks establish
+coverage and sampling correctness, not original-Xbox visual parity or gameplay
+performance. Full gameplay remains available for the user's manual check.
+
+Independent pixel-coordinate references:
+https://learn.microsoft.com/en-us/windows/win32/direct3d9/directly-mapping-texels-to-pixels
+https://learn.microsoft.com/en-us/windows/win32/direct3d10/d3d10-graphics-programming-guide-resources-coordinates
