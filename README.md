@@ -40,12 +40,11 @@ OpenAI Codex has assisted with development and research. Changes are checked usi
 ### What works
 
 - Startup, opening movies, and the main menus.
-- Story Mode gameplay, including reaching GOAL on 1-1 SIMPLE and continuing to 1-2 DIAMOND.
-- Practice Mode, including AIAI on World 2, stage 3 COMPOSITION.
+- Story Mode, Practice Mode, Challenge Mode, most minigames, and other miscellaneous features. Competition mode still needs to be tested.
 - Keyboard and gamepad input, pause/resume, and native audio playback.
 - Creating and reopening game saves.
 - Saved display, refresh-rate, audio, game-file, and keyboard/controller bindings.
-- Original 4:3, widescreen 16:9, and ultrawide 21:9 options; 1×–4× internal resolution, FXAA/MSAA, and anisotropic filtering. These options apply while playing.
+- Original 4:3, widescreen 16:9, and ultrawide 21:9 options; 1×–4× internal resolution, FXAA/MSAA, and anisotropic filtering.
 - Fresh scene rendering above 60 Hz, with the original rule and input timing preserved.
 - Frame captures, offline rendering replay, and CPU/GPU performance reports.
 
