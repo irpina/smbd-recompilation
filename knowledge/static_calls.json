@@ -2863,9 +2863,10 @@
         "0x00194976",
         "0x001ADB18",
         "0x001C1DDE",
-        "0x00235BAC"
+          "0x00235BAC",
+          "0x00235BFC"
       ],
-      "evidence": "9DAB0 iterates exactly eight physical 1B0-byte player records at 738DF0, reads each active record's +104 actor pointer through 738EF4, and invokes actor +5C at 9DAFC with (actor,0). Actor creator 8C1A0 obtains the 2F0-byte initialized actor through 9D790/9D4B0, publishes that exact pointer at 8C235, and installs nonzero argument5 at 8C2CE or default8BF80 at 8C2DF. Wrapper8C300 forwards its argument5; party wrapper238CF0 forwards argument6. A streaming original rel32 inventory found all35 CALL references to these three entry points and no tail jumps; every candidate was verified against a complete original CFG. The complete image contains no address literals publishing any of those constructor entries. Their complete caller paths supply only null(default),9D9A0,BA870,10E6F0,1178E0,129E30,137720,192E80,1AB1B0,1BAA40 or22CC90. The listed source words are original immediate literals for these eleven nonnull targets. Native field-store inventory additionally identifies the live callback replacement at1CB114, which reinstalls the same1BAA40. The 89FA0/8C7B0 physical-record resets preserve the exact actor pointer; 89A90/89AF0 and9A6A0 release/clear it, never publish an unrelated object. Actor allocation clears its header before publication; the +5C store in9B690 belongs to a separate embedded data block, not this callback word. Complete update-method CFGs retain this callback domain and update transforms/animation or use the same constructors; no new callable value is copied into the header. Original null checks, fallback path and two-argument caller cleanup remain. Research and original CFGs are indexed by the idle-demo call-workflow packet, with exact constructor-reference checks and target literal sources in idle-demo-{all-entry-references,reference-check,callback-literals}. This closes the actor-update family rather than binding the one observed idle-demo target."
+        "evidence": "9DAB0 iterates eight physical 1B0-byte player records at738DF0, reads each active record's +104 actor pointer, and calls actor+5C at9DAFC with (actor,0). Creator8C1A0 publishes the initialized 2F0-byte actor from9D790/9D4B0 at8C235 and installs nonzero argument5 at8C2CE or default8BF80 at8C2DF; argument indices are zero-based. Wrapper8C300 forwards argument5;238CF0 forwards argument6. Native references and complete original CFGs verify all35 distinct calls to these three entries, with no constructor tail jumps or address-literal publications. The earlier idle-demo audit omitted eight22CE30 arguments:235BFB,235C23,235C4B,235C73,236BC3,236BE6,236C09,236C2C. Both235B50 and236B50 install22CC90 for players0/1 and22CE30 for players2..5 through238CF0. Their intervening argument helpers return without popping the saved callback. The other callers supply null(default),9D9A0,BA870,10E6F0,1178E0,129E30,137720,192E80,1AB1B0,1BAA40 or22CC90. The twelve listed original source words cover this complete domain. A width-aware field-store inventory retains the1CB114 replacement with the same1BAA40; physical-record resets89FA0/8C7B0 preserve the actor pointer, while89A90/89AF0/9A6A0 release or clear it. Actor allocation clears the header;9B690's +5C write belongs to a separate embedded block. Neither Baseball update routine writes a new callback. Original null checks, fallback and caller cleanup remain. See knowledge/baseball_call.txt and build/checks/baseball-recovery for the complete constructor supplement to the earlier idle-demo research."
     },
     {
       "slot": "0x008B24B0",
@@ -4262,6 +4263,10 @@
         "0x0023331D",
         "0x00233351",
         "0x00233386",
+        "0x00233406",
+        "0x00233454",
+        "0x0023349C",
+        "0x002334D3",
         "0x002334FE",
         "0x00233527",
         "0x00233586"
@@ -4269,7 +4274,7 @@
       "sites": [
         "0x002335A1"
       ],
-      "evidence": "The complete mode loop 233550 starts EAX with literal 2334E0 and invokes it at 2335A1. On subsequent iterations it reloads the next callback from 87946C and copies it back to EAX. Initializer 23357F writes zero; the other direct writers at 233272..233380 and 2334F8..233538 write the eight listed original callback literals or zero. Duplicate literals are listed once. These globals are accessed directly, and the indexed executable references show no pointer to an enclosing object that could write this slot. Each nonzero callback remains a normal call with its original return address."
+      "evidence": "Original Baseball phase loop233550 starts with2334E0, calls EAX at2335A1, then reloads the next callback from87946C until it is zero. The earlier indexed-writer proof missed transitions in2333B0 and233480:233180,233260,233200 and232F20. A fresh native image reference inventory finds31 references to87946C:30 stores and the dispatch reload. Every reference matches original instruction bytes in complete bounded CFGs. Nonzero immediate stores plus the initial2334E0 give exactly the thirteen listed callbacks; the four register-source stores are proven zero in233060/2330B0/233100/233550. Recursive inspection of every callback's writes reaches this same closed set. Current879468 and previous879470 do not feed arbitrary values into the pending slot. All193 native references across879454..879478 are verified direct memory accesses, with no address publication or block-copy alias; no store overlaps the pending word from an adjacent field. Native analysis covers548 Baseball entries including the three previously uncompiled callbacks. See knowledge/baseball_call.txt and build/checks/baseball-phase-recovery for the source-word inventory, all slot operations and original CFGs. Null termination, return addresses and strict unknown-target rejection remain unchanged."
     },
     {
       "slot": "0x006D4BD0",

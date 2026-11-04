@@ -4,11 +4,13 @@
 
 <h1 align="center">Super Monkey Ball Deluxe — Static Recompilation</h1>
 
-*From the creator of the [Burnout 2 recompilation](https://github.com/timftw21/burnout2-recompilation).*
+<p align="center">
+  <em>From the creator of the <a href="https://github.com/timftw21/burnout2-recompilation">Burnout 2 recompilation</a>.</em>
+</p>
 
 An unofficial native version of the original Xbox game for Windows, built around accurate gameplay, the original presentation, and higher refresh rates.
 
-**0.2.0 is the latest public development release.** Bugs, slowdowns, and stops in untested game modes are still possible. Linux and macOS are planned targets; the current game build requires Windows x64.
+**0.3.0 is the latest public development release.** Bugs, slowdowns, and stops in untested game modes are still possible. Linux and macOS are planned targets; the current game build requires Windows x64.
 
 This fan project is independent of SEGA. You must provide your own US Xbox game disc image. Original game files are not distributed here.
 
@@ -24,18 +26,22 @@ OpenAI Codex has assisted with development and research. Changes are checked usi
 
 ## Current status
 
-### Changes in 0.2.0
+### Changes in 0.3.0
 
-- Fixed 15 correctness issues spanning a variety of systems. These fixes bring the recomp much closer to Xbox parity.
-- Fixed certain crashes while playing minigames.
-- Made adjustments to HUD elements in ultrawide mode.
-- Added an **Exit game** button to the Settings UI.
+- Fixed overlay sizing issues at their root. No more gaps within menus!
+- Fixed Monkey Baseball crashes. Open an issue if any other minigame is giving you trouble :)
+- Addressed a few more ultrawide issues.
+- Fixed delayed subtitles in FMVs. Pretty sure this was a regression. Sorry about that :(
+- Addressed a handful of egregious timing issues at high frame rates.
+- The mouse cursor now automatically hides after a couple seconds of inactivity.
+- Polished the installer's UI.
 
 ### Known issues
 
-- Monkey Baseball crashes. A fix is planned for the next release.
-- Specific timing issues while playing at higher refresh rates.
-- Specific upscaling quirks.
+- Subpar performance above 60 Hz. 0.4.0 will provide major optimizations.
+- Timing issues above 60 Hz. Fixes are ongoing.
+- Your antivirus software may flag the setup executable as a virus; it's a false positive.
+- Other issues that I'm sure I'll find.
 
 ### What works
 
@@ -62,7 +68,7 @@ OpenAI Codex has assisted with development and research. Changes are checked usi
 
 You need a Direct3D 11-capable graphics card and an XISO image of the **US Xbox release of Super Monkey Ball Deluxe**. A full raw-disc dump must first be converted to XISO. The executable is checked against [the supported-target registry](knowledge/supported_target.json).
 
-**[Download the 0.2.0 Windows installer](https://github.com/timftw21/smbd-recompilation/releases/download/v0.2.0/smbd-0.2.0-windows-x64-setup.exe)** · [Release notes and SHA-256 checksum](https://github.com/timftw21/smbd-recompilation/releases/tag/v0.2.0)
+**[Download the 0.3.0 Windows installer](https://github.com/timftw21/smbd-recompilation/releases/download/v0.3.0/smbd-0.3.0-windows-x64-setup.exe)** · [Release notes and SHA-256 checksum](https://github.com/timftw21/smbd-recompilation/releases/tag/v0.3.0)
 
 1. Run the installer and select your US Xbox XISO image.
 2. Choose an installation folder. You can keep a copy of the image with the game and create a desktop shortcut.

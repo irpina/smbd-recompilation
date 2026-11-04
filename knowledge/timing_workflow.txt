@@ -1,0 +1,277 @@
+Systematic timing research, 2026-11-03
+
+Target: Super Monkey Ball Deluxe USA XBE from the local XISO.
+SHA256: 9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2.
+
+Run tools/Build.ps1 -Stage Timing -LiveTiming -Workers 3 for generation, both
+native executables, existing CPU/input/audio checks, the timing audit and four
+silent gameplay routes. Omit -LiveTiming for the numeric/research stage. This reuses
+prepared, verified XISO extraction. Run the All stage only if preparation is
+missing/stale. The user requested three workers for this work.
+
+tools/Audit-Timing.ps1 -InventoryOnly reuses build/generated/batch.json.
+Without that switch it also executes knowledge/timing_cases.json through
+the same AOT code as the game. No Python, runtime instruction decoding,
+third executable, audio playback or computer use is involved.
+tools/Check-TimingLive.ps1 follows with isolated, hidden/muted story/replay
+runs at 60/144/360/Unlimited. Its local save seed is copied separately for
+each run; user settings and saves are not written. Override -StorageSeed
+with an equivalent prepared seed if the recorded local seed is unavailable.
+The route checks the original 183-tick goal/replay transition, per-scene ball
+and render-matrix changes, and draw submissions. It does not certify other
+modes or manual visual parity.
+
+Discovery:
+- Batch generation reuses each bounded decoded function. It exports original
+  bytes, actual generated timing changes (including whole-entry gates), call
+  sites, and candidate read/arithmetic/write recurrences. The original event
+  table at 477CE8 supplies all 22 event roots; 14D80 supplies the shared frame
+  and mode root. Registration callbacks remain coverage obligations even when
+  no supplied playthrough reached them.
+- The original CFG plus emitted unconditional logic=false jumps narrows the
+  possible intermediate-scene path. Dynamic conditions remain conservative;
+  a possible scene path is NOT evidence that every caller runs continuously.
+  Native menu and swept-goal bridges explicitly contribute their guest roots.
+- Integer counters split from their loads by branches are also candidates.
+  load=0 means no same-block load alias proof, not address zero being read.
+  Provenance also follows integer/float conversions and shifts: converting
+  an integer angle to float, scaling it, then rounding it back is a persistent
+  recurrence. Ignoring those conversions hid previously "fixed" drift.
+- Draw paths below rule gates are listed separately. Construction, deletion,
+  registered callbacks and recurring drawing must be distinguished using the
+  original callers. A gate can hide drawing even if every timer is correct.
+
+Research and correction procedure:
+1. Group candidates by owning event, handler table and persistent field. Use
+   inventory.json and calls.json to find shared producers and consumers.
+2. Reuse prior analysis or issue one bounded analyse-set for that family.
+   Check the original operand order, units, field width, flags/ABI, resets,
+   wrap, pause and lifecycle. Follow both sides of displacement/velocity
+   conversions and both producers and consumers of short-lived events.
+3. Supply a small valid state to probe-cpu. '-' constructs memory from the
+   verified XBE for asset-independent routines. Asset cases require a real
+   capture with the researched snapshot hash; missing assets/host services
+   are explicit failures, never substitute successful API returns.
+   For mixed routines, call-until ENTRY BREAKPOINT LIMIT STACK [ARG...] uses
+   the existing AOT diagnostic breakpoint. It stops before a chosen function,
+   reports returned=false and the exact breakpoint, and permits state reads.
+   A missing breakpoint or other native boundary fails. This proves only the
+   executed prefix, never the skipped drawing or a successful host API call.
+4. Reproduce before changing the lowering. Compare equal elapsed time across
+   60, 75, 120, 144, 165, 240, 360 and 1000 Hz, uneven uncapped intervals,
+   and bounded catch-up intervals. A 30-cap check retains 60 Hz scene steps.
+   These interval schedules are numeric probes, not monitor/FPS measurements.
+5. Check intermediate samples as well as endpoints. Include event expiry,
+   clip wrap, state changes and pause; steady-state agreement alone is weak.
+   Preserve independently derived rules and recorded 60 Hz bytes. Fix shared
+   units/clocks/ownership at their producer instead of multiplying arbitrary
+   additions or holding an entire mixed update/draw routine.
+6. Rebuild, rerun numeric probes, then run silent hidden gameplay routes with
+   isolated settings/saves. Compare event ticks and fresh per-scene motion
+   and drawing. Visual acceptance remains the user's manual check.
+
+Artifacts and acceptance:
+build/checks/timing/inventory.json is the current discovery queue, including
+existing fixes which still need scrutiny. Each run-* directory retains recipes,
+native probe outputs and a summary; report.json points to the latest result.
+Reports include XBE, tool, batch/case and optional snapshot hashes. Numeric
+failures return a failure exit code. Do not equate passed=true for the supplied
+probes with an exhaustive audit; exhaustive remains false. The candidate
+search deliberately does not prove cross-block aliases, runtime lifecycles,
+transient-event delivery or complete gameplay/visual parity.
+knowledge/timing_cases.json also contains address-specific research decisions.
+The inventory links candidates and existing changes to these decisions; the
+numeric report separately records whether their required cases passed. Input
+hashes must remain unchanged during a run. Each run keeps its case manifest.
+Unreviewed candidates remain needs_research, including old fixes without proof.
+live-report.json points to the latest live result; its rate list and executable
+hash define its scope. Timestamped directories retain earlier results.
+
+The initial six-case matrix caught a shared integer-turn defect missed by
+the prior 60/144/360 probes. frame_integer_increment reconstructed the previous
+phase as phase-delta+tick. For a 0.2 then 0.3 tick interval, rounding can turn
+the previous 728 angle units into 727 before truncation, inventing one unit.
+75 Hz, 1000 Hz and irregular intervals reproduced this through original
+A3530 -> A2F50 -> A3059 -> 298B0. FrameStep now carries the actual previous
+phase; adjacent scenes quantize the same boundary. Whole-tick code is unchanged.
+The same helper serves banana turns, recovery, heading and persistent spins.
+
+WORLD duration and responses:
+- A8060 decrements signed 16-bit WORLD+1C at A80E2. It now advances only on
+  rule ticks; responses, player traversal and gravity transforms remain per scene.
+- A7DA0 and A7E70 apply signed /4 tilt responses. The fractional response now
+  retains angle precision instead of rounding every small increment. Both signs
+  and recorded replay targets pass; original five-tick 60 Hz bytes are pinned.
+- A7F20 first approaches the input by .2 and then damps the result by .8.
+  Scaling those independently changes the resting angle. Compose the original
+  affine map (retention .64) first, then take its fractional iterate. Original
+  full-tick conversions remain intact. The bounded integer-rounding error is
+  less than 1.8/(1-.64)=5 angle units; the numeric oracle uses that bound.
+- A7880's A7D05 relaxation was already "fixed" with a scaled .2 gain, but its
+  following integer conversions lost precision every scene. At 1000 Hz it
+  lost 25.8 units in five original ticks, beyond the original rounding bound
+  of 1/(1-.8)=5. The precision now survives at the final stores A7D45/A7D48.
+  The earlier gain-only lowerings at A7D1B/A7D2E were removed.
+- A8000 proves four records of stride 3C beginning at 73E930. State is bounded
+  to those eight angles, with no allocation. Original all-record/per-record
+  initializers A8000/A7820 clear the matching history. Controller switches and
+  external angle changes also resynchronize it. Pause leaves it frozen.
+
+Ball-size expiry:
+8BC90..8BCA7 removes the size-effect flags when duration becomes negative and
+skips response on that original tick. Scaling the steady .3/.2 gains alone
+applied the wrong response across expiry. Shrinking now uses only the active
+portion of an interval; the original one-tick hold is preserved, and any trailing
+phase starts recovery. The 20-tick case checks every sample through this boundary.
+
+Storage-dialog fade:
+1DD10 is reached from recurring HUD drawing at 6A1E0. 1C920 checks the three
+dialog-state bytes; 1DD6D/1DD86 decrement/increment 6D010C, clamped to 0..8.
+1DDA5 multiplies that count by .1 for backdrop alpha. The prefix probe stops
+at 74F10 before any drawing service. Before correction, 27 of 33 opening,
+closing and clamp checks failed. Duration now follows rule ticks, while alpha
+uses the current phase and drawing still runs each scene. The first opening
+fraction is visible even with integer count zero. Original 60 Hz bytes match.
+
+Validation and remaining scope:
+The latest numeric matrix contains 21 cases / 231 checks. Original 60 Hz values,
+opposite signs, input clamps, pause/resume, both WORLD initializers, duration
+expiry and irregular intervals pass. CPU (23), input (58), audio (37) and clock
+(31) diagnostics pass; the recovered game graph has zero unresolved call sites.
+The combined workflow completed the silent 60/144/360/Unlimited story route,
+each with 183 ticks from goal to replay and fresh ball/render-matrix samples.
+After the last WORLD precision correction, the rebuilt executable also passed
+the 360 Hz route: 183 transition ticks, 116 fresh samples, zero held samples
+or drawless scenes in the checked rolling/replay windows.
+See the report hashes for which executable each run actually exercised.
+
+The index is a research queue, not a claim that every recurrence is a defect:
+for example 13B70's INFO initializer increments a course counter, while 1F4C0
+temporarily changes draw depth (+.5 then -.5 around 5A5A0's queue drawing).
+Neither is elapsed time. Geometry, setup, allocation and queue consumption
+must retain their original arithmetic. Most discovered sites and old timing
+changes still require classification or mode-specific executable evidence;
+transient events, animation boundaries and party-mode lifecycles remain explicit
+coverage obligations. No exhaustive gameplay, visual or performance claim is made.
+
+Animation blend follow-up, 2026-11-04
+
+99300 and 99410 call 97E00 to blend skeletal transforms. The original
+97E1C adds one to the elapsed clock at model+28 after sampling the blend
+weight. Both blend probes failed every fractional schedule because that
+increment ran once per scene. The clock now advances on rule ticks, while
+97E13 samples the blend weight at the scene phase. The original branch at
+97E0C still clears the secondary clip and both clocks on the completion
+tick. The clip selector at 9C5B5 uses that same boundary.
+
+The prefix probes check the blend weight, original 60 Hz bytes, completion
+of a 2.5-tick blend on tick four, and pending clip selection. The full matrix
+passed 264 checks. The silent first-story-stage route passed at 60, 144,
+360 and Unlimited, with 183 goal-to-replay ticks at each rate and zero held
+motion samples or drawless scenes in the checked windows.
+The three-worker relink passed the same numeric matrix and a fresh 360 Hz
+route with 183 transition ticks, 104 fresh samples and zero held or drawless
+scenes. Its live report is in build/checks/timing/relink.
+
+Clip playhead follow-up
+
+Forward and reverse clips spanning frames 0..3 and a one-shot clip wrap or
+finish on original tick four. At 360 the count or end flag changed by tick
+three. Scaling 97D37 also changed the wrap distance at 97D9C/97DE2. Keep the
+full original increment in 97D20 and advance the guest playhead on rule ticks.
+The 9C540 flag producer and 9AEA0 completion query use that clock, so the
+fallback for clips that looped between ticks is obsolete.
+
+99300 samples the scene phase once per track before passing the time to
+98B50. Its normal pose precedes the rule advance. Between ticks, sample that
+same interval from the saved pre-advance position and hold its endpoint until
+the next rule selects the restart pose. The original initializer and seek
+paths discard old samples, including a seek that writes identical bytes.
+98920 transfers the outgoing interval with the secondary blend track.
+
+The complete playhead build passed 330 numeric checks and all four muted
+story routes. In the verified replay capture, two actual bone matrices
+changed between frames 4 and 4.5. The fractional matrices matched a direct
+evaluation at 4.5 byte for byte, while the guest playhead remained 5. The
+separate comparison is in build/checks/timing/research/boundaries.
+
+Character cue follow-up
+
+9C540 and 94F60 run their cue state alongside pose work. At the first
+intermediate scene both reached the original PRNG at 30B60C and consumed a
+roll before the first game tick. In 94F60 the cue duration also counted
+down on rendered scenes. Gating only a decrement, as 9C540 previously did,
+leaves the roll, state transitions and increment on the wrong cadence.
+
+The cue paths now skip their event work together on intermediate scenes.
+They still run the surrounding pose work and reach 98B20 through the
+original stack cleanup. The seeded prefix probes follow the original first
+roll, 14-tick duration, expiry and later misses, and verify the model passed
+to 98B20. The menu-path probe fills the original model slots with the
+captured character's compatible models and exercises that selected-slot
+path independently of full menu gameplay.
+
+Character blend weights
+
+The same paths use 347B84 (3.0) to approach two sampled blend weights.
+The menu used the whole three units on every scene. The actor already
+scaled its step, but its x87 comparison still snapped to the target from
+up to three units away. In a quarter-tick probe, both paths snapped from
+-0.889027 to +1.110973 instead of moving 0.75 units. The menu's falling
+weight also moved 3.0 units instead of 0.75.
+
+The signed step and the x87 threshold now use the same interval-scaled
+value in both original branches of each path. Whole-tick arithmetic is
+unchanged. The probes measure both directions through arrival and pin the
+captured target bytes. The verified capture supplies the channel samples
+and every model used by the selected menu slot.
+
+The combined three-worker build passed all 374 numeric checks and all four
+muted story routes. Each route reached replay after 183 game ticks, with
+fresh motion and draws throughout the checked windows.
+
+Text box reveal and scale
+
+In 6BB60, 6BC96 feeds the reveal threshold at 6BCB0 and the original text
+parser at 6BCBE. Over one original tick the old code wrote a clock of 1 and
+four response values of 0.1 at 60 Hz. Six 360 Hz scenes wrote a clock of 6
+and four values of about 0.469. The clock and parser now run on rule ticks.
+The parser's glyph indices, line count and per-glyph delay progression
+still follow the original tokens. The 0.1 opening and 0.15 closing gains
+now compose across scene intervals. All 27 fractional checks failed before
+the fix. The full matrix then passed all 407 checks, including reveal start,
+the string terminator, pause/resume and both scale paths.
+The three-worker build also passed the four muted story routes, each with
+the 183-tick goal-to-replay transition and fresh motion and draws in the
+checked windows.
+
+The actual 6B520 draw path reaches 236F0 at the first half-tick, with a
+positive opening transform. Two half-tick samples give the same scale as
+one full tick to within two float steps. The probe ends before submission.
+
+Text box placement and roll
+
+6C216 compares relative positions before and after placement. 6C2B7 applies
+the resulting angular impulse and 6C2FC stores the damped velocity. Gating
+only the spring loses its original input, since the intermediate placement
+steps have already moved the starting vector. The detached box previously
+reached roll 230 and velocity -20 at 360 Hz in the time the original reached
+92 for both. The captured anchored box also diverged on its first impulse.
+
+6BB60 now commits the full original placement and spring together on rule
+ticks. Its fractional draw sample evaluates the original next placement on
+a private guest-stack record and samples the positions and shortest signed
+roll at the current phase. The preview leaves the actual box, text queue,
+guest floating-point state and shared transform intact. 6B520 uses the
+sample for drawing with the original appearance and glyph data.
+
+The detached pause/resume and anchored traces failed all 18 fractional
+checks before correction. Both now match every recorded original pose and
+spring value, and the full matrix passed 429 checks. The normal draw
+callback reached 236F0 with exact transforms for detached rolls 46 and
+110 at 0.5 and 1.25 ticks, and for the captured anchored half-tick pose.
+The probes end before submission. The recipes and comparison report are
+under build/checks/timing/research/next-counters.
+The three-worker build passed the four muted story routes, all with the
+183-tick goal-to-replay transition and fresh motion and draws in the
+checked windows.

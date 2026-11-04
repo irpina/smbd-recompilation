@@ -175,6 +175,10 @@ original-state report; scripted diagnostics retain their failure exit code.
 
 Dialog dimming backdrop (2026-10-30, supported executable SHA-256
 9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2):
+Implementation update2026-11-03: the dialog descriptor mutation and separate
+menu/fade adjustments described in these historical sections are removed.
+Shared313B0 completion now handles pixel coverage and full-canvas aspect sizing;
+see knowledge/golf_pause_overlay.txt and build/checks/overlay-audit.
 1DD10 renders storage dialogs; 1DDBA passes the static sprite at 482FB8 to
 75400. The verified descriptor uses solid 8x8 sprite 60, centre (320,240),
 depth 1, scale (80,60). Capture frame-1793405530285-173875180800 draw 509
@@ -325,3 +329,135 @@ painting flags and wood-coloured client edges. Installation to a Unicode path,
 muted game boot and uninstall pass on the final release artifact. Rebuilt with
 three workers. The updated installer SHA-256 is
 D691060EC18A4F9CFEF7E0A48D635D2C5B22A0D1D99124B54845D7AD2DA9BC59.
+
+Installer layout and release identity refinement (2026-11-03)
+
+The installation header and introduction use the requested wording. The first
+panel has 24-DIP outer padding and larger row gaps. Each checkbox remains a
+native automatic checkbox inside a brown row with 12-DIP horizontal and 4-DIP
+vertical padding. Panel, footer and client bounds share layout constants;
+progress captions, the bar, elapsed text and footer share the same left/right
+edges. The preferred client size is 880x692 DIPs.
+
+Install starts disabled and updates immediately on either edit's EN_CHANGE.
+Both paths must contain non-whitespace text. The same readiness check protects
+start(), while running/complete states retain disabled installation, Play game
+and uninstall behavior. Idle previews include the button's enabled state.
+
+Game, diagnostics and installer now use one version-resource template with
+consistent product identity and accurate original filenames. Package.ps1 accepts
+SigningCertificateThumbprint, TimestampUrl and RequireSignature. It checks the
+selected CurrentUser/My certificate's private key and trusted code-signing chain,
+uses SHA-256 signatures and RFC 3161 timestamps, and verifies each signature.
+Staged application files are signed before manifest hashes/compression; valid
+third-party signatures are retained. The final installer is signed after its
+payload is embedded, before release checksums are written. Uninstaller copies
+preserve the exact bytes. No certificate was provided, so this release is
+explicitly NotSigned; actual signing awaits a suitable certificate.
+
+Microsoft distinguishes antivirus false detections from SmartScreen reputation.
+Consistent trusted signing helps identify the publisher, but is not a guarantee
+against detections or first-release warnings. No protection settings, exclusions,
+executable packing tricks or vendor uploads are part of this change. Sources:
+https://learn.microsoft.com/en-us/defender-xdr/developer-faq
+https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation
+https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool
+
+Validation: build/checks/installer-refinement-20261103/report.json. Offscreen
+96/144/192-DPI idle and progress previews retain buffered painting and zero idle
+timer invalidations; Install is disabled with no image selected. The Unicode
+installation verifies all 14 payload hashes. Upgrade preserves preference values
+(normalizing line endings) and saves; uninstall preserves them and the source
+ISO. Unsigned/malformed required-signing configurations are rejected before work.
+The final artifact's local Microsoft Defender scan reports no threats. Other
+antivirus engines and actual trusted signing are not verified by this scan.
+Built with three workers; no game session or computer-use control was launched.
+Artifact: build/release/0.2.0/smbd-0.2.0-windows-x64-setup.exe
+SHA-256: 92BDB968598B68CE7CA32B255B64933338B5A1E405C01995867ED384B2EE7815.
+
+Gameplay cursor and settings annotation (2026-11-03)
+
+SettingsUi owns the inactivity policy because ImGui's SDL backend normally
+shows the cursor every frame, including empty gameplay UI frames. During play,
+with settings closed and both keyboard/mouse focus, two seconds without mouse
+activity hides the cursor and temporarily stops backend cursor updates. Mouse
+motion, button, wheel and window focus/visibility events restore it immediately.
+Settings and the launcher keep it visible; focus loss, minimization and UI
+destruction restore normal cursor control. SDL's monotonic clock is independent
+of game timing, refresh rate, controller and keyboard activity.
+
+The save hint uses the system's actual Segoe UI Italic face. Both fonts are
+resolved from the Windows installation directory instead of a fixed drive.
+Its text line bottom shares the icon's height/position; right alignment and
+the other text's regular face are retained. Fonts load before gameplay.
+
+Validation: build/checks/cursor-settings-20261103/report.json. Rebuilt with three
+workers and captured all seven settings pages plus open/close animation states.
+The final packaged copy installs to a Unicode path, matches all 14 payload
+hashes, renders the updated settings and uninstalls successfully. Its Defender
+scan finds no threats. No interactive computer use or gameplay session was
+launched; actual mouse/focus interaction remains a manual check.
+Refreshed installer: build/release/0.2.0/smbd-0.2.0-windows-x64-setup.exe
+SHA-256: 9C8D273A71B55100F2001D27BF21832F6F309307FB903C07DAE6145B7CB99768.
+
+FMV subtitle pacing, 2026-11-03
+
+Same supported USA executable SHA-256 above. Bounded original analyses,
+silent native runs, performance records and validation reports are under
+build/checks/fmv-sync. Both external movie starters (AA2EF and248434), plus
+the queued restart atE6090, useE5E90. Active playback sets756088 with player
+756080. The common frame wrapper2A640 callsE5990 at2A65D; this is E5990's
+only original caller. E5990's active path jumps31D960. The original SDK
+routine clears its event signal word at device+1DC0 and waits for a future
+vertical blank, even if decode/render work has already missed a blank.
+
+The host had exempted movies from its absolute producer deadline, leaving
+that next-vblank wait to pace them. Alternating expensive decoded frames and
+cheap repeated-video frames could then consume three blanks for two game
+updates: the reported40/60 swings. Media/audio clocks continue in real time,
+while original subtitle/controller counters advance once per game update.
+Opening controllerA8AB0 increments its caption counter atA8AD6/A8AF2 and
+mode timer atA8CEE. Scheduling loss therefore accumulates subtitle delay.
+
+Active FMVs now use the same absolute60 Hz source deadline as normal60 Hz
+game updates. Late slots are retained, so a cheap frame can recover the time
+spent decoding the previous frame. Playback start/stop begins a fresh epoch
+and excludes prebuffering time. Movie source updates stay60 Hz when a higher
+display rate is selected; ordinary scenes regain their selected rate afterward.
+The game-specific E5990 vblank gate is folded into that common wait. Its
+original pointer/flag tests, arithmetic flags, return ABI and SDK event reset
+remain. The generic D3D_BlockUntilVerticalBlank implementation is unchanged.
+The AOT lowering verifies the original five-byte tail jump and target.
+Subtitle cue data, counter increments, video decoding and audio timing are
+unchanged; no subtitle offsets or playback-speed compensation are introduced.
+
+Opt-in motion records now include acquired movie frames (player+80), decoder
+skips (+88), the sync flag and the opening caption counter. Original2DA9C9
+increments the acquired-frame count;2DA9A8 increments its skip count. Caption
+ticks are23*byte(object+C)+byte(object+E), following the original sequencer.
+These reads occur only during requested diagnostic sampling.
+
+Windows hardware: Ryzen5 5600X / RTX5060Ti. Matched60 Hz/VSync-on/3x/MSAA8
+opening runs advance the same1000 caption/controller samples (ticks16..1015).
+Before:999 increments take17.7721614 seconds,56.2115 ticks/s, including repeated
+half-second intervals with only20 frames. After:16.6402434 seconds,60.0352
+ticks/s. Recording600 source images takes10.2677 seconds before and9.99355
+seconds afterward. Source interval median improves17.9843 ->16.620 ms and
+p99 33.2712 ->26.708 ms. Late publications still occur; this does not claim
+that every native presentation completes within16.667 ms.
+
+The final58-second silent run completes the movie naturally and reaches the
+following attract mode, exit0. Its2675 active-movie samples span44.5612404
+seconds:2674 caption increments (60.0073/s),1336 acquired video frames
+(29.9812/s), zero decoder frame skips. Caption ticks minus twice the acquired
+frame count stays bounded at-3..1 ticks, from-2 initially to0 finally: no
+accumulating drift. A separate360 Hz/VSync-off skip run exits0, retaining
+unit movie steps and restoring fractional native scene steps after skipping.
+All game runs are hidden and explicitly muted, preserving normal audio mixing.
+
+Native checks pass:31 clock scheduling assertions, including alternating
+8/2-ms and20/2-ms work budgets; four E5990 flag/register/stack/event cases;
+23 CPU cases;196 services;37 offline audio cases. Game and tool builds use
+three workers,10632 native functions, zero unresolved sites. Only existing
+diagnostics were extended; scratch recipes remain ignored build artifacts.
+No computer use or user save/settings modifications were involved.

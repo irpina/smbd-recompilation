@@ -11,24 +11,37 @@
 
 namespace smbd {
 double frame_gain_double(FloatingState&,double);
+void reset_frame_history();
 // Recipes contain reset, reg NAME WORD, xmm INDEX WORD WORD WORD WORD,
 // write32 ADDRESS WORD, step DELTA_BITS PHASE_BITS LOGIC, load ADDRESS FILE,
-// call ENTRY CHECKPOINT_LIMIT STACK [ARG...], and
+// call ENTRY CHECKPOINT_LIMIT STACK [ARG...],
+// call-until ENTRY BREAKPOINT CHECKPOINT_LIMIT STACK [ARG...], and
 // read ADDRESS BYTES. Calls execute only the verified AOT registry.
 std::string probe_cpu(Xbe& image,const std::filesystem::path& capture,const std::filesystem::path& recipe) {
     struct Restore {FrameStep saved=frame_step;~Restore(){frame_step=saved;}} restore;
-    frame_step={};
+    frame_step={};reset_frame_history();
     if(!image.supported()) throw std::runtime_error("CPU probes require the supported executable");
     for(const auto& function:compiled_batch)
         if(function.source_sha256!=image.sha256) throw std::runtime_error("Compiled code belongs to another executable");
-    File metadata(capture/"capture.json"),snapshot(capture/"guest-memory.bin"),commands(recipe);
-    if(metadata.size()>4096 || commands.size()>65536 || snapshot.size()!=64*1024*1024)
-        throw std::runtime_error("CPU probe capture or recipe exceeds its fixed bounds");
-    const auto meta=metadata.read(0,static_cast<std::size_t>(metadata.size()));
-    const std::string_view description(reinterpret_cast<const char*>(meta.data()),meta.size());
-    if(description.find("\"source_sha256\":"+json(image.sha256))==description.npos)
-        throw std::runtime_error("CPU snapshot belongs to another executable");
-    const auto original=snapshot.read(0,static_cast<std::size_t>(snapshot.size()));
+    File commands(recipe);
+    if(commands.size()>65536) throw std::runtime_error("CPU probe recipe exceeds its fixed bound");
+    std::vector<std::byte> original;
+    std::string snapshot_hash;
+    if(capture=="-") {
+        original.resize(64*1024*1024);
+        if(std::uint64_t(image.base)+image.image_size>original.size()) throw std::runtime_error("CPU probe image exceeds memory");
+        image.load(std::span(original).subspan(image.base,image.image_size),false);
+    } else {
+        File metadata(capture/"capture.json"),snapshot(capture/"guest-memory.bin");
+        if(metadata.size()>4096 || snapshot.size()!=64*1024*1024)
+            throw std::runtime_error("CPU probe capture exceeds its fixed bounds");
+        const auto meta=metadata.read(0,static_cast<std::size_t>(metadata.size()));
+        const std::string_view description(reinterpret_cast<const char*>(meta.data()),meta.size());
+        if(description.find("\"source_sha256\":"+json(image.sha256))==description.npos)
+            throw std::runtime_error("CPU snapshot belongs to another executable");
+        original=snapshot.read(0,static_cast<std::size_t>(snapshot.size()));
+        snapshot_hash=hash(snapshot,0,snapshot.size());
+    }
     auto storage=original;Memory memory(0,storage);
     const auto heap_begin=(image.base+image.image_size+4095U)&~4095U;
     if(heap_begin>=storage.size()) throw std::runtime_error("CPU snapshot has no heap range");
@@ -37,7 +50,7 @@ std::string probe_cpu(Xbe& image,const std::filesystem::path& capture,const std:
     struct VirtualSnapshot {std::uint32_t base;std::vector<std::byte> original,bytes;};
     std::vector<VirtualSnapshot> virtual_ranges;std::uint64_t virtual_bytes=0;
     std::string virtual_hash;
-    if(std::filesystem::exists(capture/"virtual-memory.bin")) {
+    if(capture!="-" && std::filesystem::exists(capture/"virtual-memory.bin")) {
         File virtual_file(capture/"virtual-memory.bin");
         if(virtual_file.size()<16 || virtual_file.size()>64*1024*1024+16384*8+16)
             throw std::runtime_error("Virtual snapshot exceeds its physical-memory bound");
@@ -85,13 +98,13 @@ std::string probe_cpu(Xbe& image,const std::filesystem::path& capture,const std:
             if(command=="reset") {
                 std::memcpy(storage.data(),original.data(),storage.size());
                 for(auto& range:virtual_ranges) std::memcpy(range.bytes.data(),range.original.data(),range.bytes.size());
-                cpu=Cpu{};cpu.clock=&clock;frame_step={};
+                cpu=Cpu{};cpu.clock=&clock;frame_step={};reset_frame_history();
             }
             else if(command=="step") {
                 const auto delta=std::bit_cast<float>(next()),phase=std::bit_cast<float>(next());const auto logic=next();
                 if(!std::isfinite(delta) || delta<=0 || delta>2 || !std::isfinite(phase) || phase<0 || phase>=1 || logic>1)
                     throw std::runtime_error("Invalid CPU probe timestep");
-                frame_step={delta,phase,logic!=0};
+                advance_frame_step(delta,phase,logic!=0);
             }
             else if(command=="reg") {
                 std::string name;words>>name;const auto value=next();
@@ -124,8 +137,9 @@ std::string probe_cpu(Xbe& image,const std::filesystem::path& capture,const std:
                 if(size>4096 || read_bytes+size>1024*1024) throw std::runtime_error("CPU probe read limit exceeded");
                 read_bytes+=size;
                 record(std::format("{{\"line\":{},\"address\":{},\"bytes\":{}}}",line_number,json(hex32(address)),json(hex_bytes(Bytes(static_cast<const std::byte*>(memory.access(address,size)),size)))));
-            } else if(command=="call") {
-                const auto entry=next(),limit=next(),stack=next();
+            } else if(command=="call" || command=="call-until") {
+                const auto entry=next(),stop=command=="call-until"?next():0,limit=next(),stack=next();
+                if(command=="call-until") {if(!stop) throw std::runtime_error("CPU probe breakpoint is zero");image.code_section(stop);}
                 if(!limit || limit>1000000 || budget+limit>16777216 || ++calls>4096)
                     throw std::runtime_error("CPU probe execution limit exceeded");
                 budget+=limit;image.code_section(entry);
@@ -136,19 +150,25 @@ std::string probe_cpu(Xbe& image,const std::filesystem::path& capture,const std:
                     if(++count>32) throw std::runtime_error("CPU probe argument limit exceeded");
                     memory.store<std::uint32_t>(stack+4*count,number(argument));
                 }
-                ExecutionDiagnostic diagnostic;diagnostic.remaining=limit;cpu.diagnostic=&diagnostic;
-                try {invoke_native(cpu,memory,entry);} catch(...) {cpu.diagnostic=nullptr;throw;}
+                ExecutionDiagnostic diagnostic;diagnostic.remaining=limit;diagnostic.break_address=stop;cpu.diagnostic=&diagnostic;
+                bool stopped=false;
+                try {invoke_native(cpu,memory,entry);}
+                catch(const NativeBoundary& boundary) {
+                    cpu.diagnostic=nullptr;
+                    if(!stop || boundary.address!=stop || diagnostic.break_hit) throw;
+                    stopped=true;
+                } catch(...) {cpu.diagnostic=nullptr;throw;}
                 cpu.diagnostic=nullptr;
-                if(cpu.eip!=sentinel) throw std::runtime_error("CPU probe routine did not return to its sentinel");
+                if(stop?!stopped:cpu.eip!=sentinel) throw std::runtime_error("CPU probe routine missed its requested return or breakpoint");
                 std::string registers;
                 for(auto value:cpu.registers) {if(!registers.empty()) registers+=',';registers+=json(hex32(value));}
-                record(std::format("{{\"line\":{},\"entry\":{},\"checkpoints\":{},\"registers\":[{}],\"flags\":{}}}",line_number,json(hex32(entry)),diagnostic.visits,registers,json(hex32(cpu.flags))));
+                record(std::format("{{\"line\":{},\"entry\":{},\"checkpoints\":{},\"returned\":{},\"breakpoint\":{},\"registers\":[{}],\"flags\":{}}}",line_number,json(hex32(entry)),diagnostic.visits,!stopped,json(hex32(stop)),registers,json(hex32(cpu.flags))));
             } else throw std::runtime_error("Unknown CPU probe command: "+command);
             std::string extra;if(words>>extra) throw std::runtime_error("Unexpected CPU probe operand");
         }
     } catch(const std::exception& failure) {error=failure.what();cpu.diagnostic=nullptr;}
     return std::format("{{\"format\":\"smbd-cpu-probe-v1\",\"passed\":{},\"source_sha256\":{},\"snapshot_sha256\":{},\"virtual_snapshot_sha256\":{},\"virtual_snapshot_bytes\":{},\"recipe_sha256\":{},\"calls\":{},\"loaded_bytes\":{},\"line\":{},\"error\":{},\"eip\":{},\"records\":[{}]}}",
-        error.empty(),json(image.sha256),json(hash(snapshot,0,snapshot.size())),json(virtual_hash),virtual_bytes,json(hash(commands,0,commands.size())),calls,loaded_bytes,line_number,json(error),json(hex32(cpu.eip)),records.str());
+        error.empty(),json(image.sha256),json(snapshot_hash),json(virtual_hash),virtual_bytes,json(hash(commands,0,commands.size())),calls,loaded_bytes,line_number,json(error),json(hex32(cpu.eip)),records.str());
 }
 std::string check_cpu(Xbe& image) {
     if (!image.supported()) throw std::runtime_error("CPU diagnostics require the supported executable");
@@ -311,6 +331,49 @@ std::string check_cpu(Xbe& image) {
         }
         require(rejected,"UI dispatch admitted an unrelated compiled function");
     });
+    check("original Baseball actor dispatch for both player callbacks",0x0009DAB0,[&] {
+        constexpr auto actor=data+0x3000;
+        std::memset(memory.access(actor,0x2F0),0,0x2F0);
+        std::memset(memory.access(0x738DF0,8*0x1B0),0,8*0x1B0);
+        memory.store<std::uint8_t>(0x892114,0);
+        const auto reach=[&](std::uint32_t target) {
+            Cpu cpu;ExecutionDiagnostic diagnostic;diagnostic.remaining=10000;diagnostic.break_address=target;
+            cpu.diagnostic=&diagnostic;cpu.registers[esp]=stack;
+            memory.store<std::uint32_t>(stack,sentinel);
+            bool reached=false;
+            try {invoke_native(cpu,memory,0x0009DAB0);}
+            catch(const NativeBoundary& boundary) {
+                reached=boundary.address==target && cpu.eip==target &&
+                    std::string_view(boundary.what()).find("execution diagnostic breakpoint reached")!=std::string_view::npos;
+                if(!reached) throw;
+            }
+            require(reached,"Original actor dispatch did not reach the requested callback");
+            require(memory.load<std::uint32_t>(cpu.registers[esp])==0x9DAFF &&
+                memory.load<std::uint32_t>(cpu.registers[esp]+4)==actor &&
+                memory.load<std::uint32_t>(cpu.registers[esp]+8)==0,
+                "Actor callback lost its arguments or return address");
+        };
+        for(unsigned slot=0;slot<8;++slot) {
+            const auto record=0x738DF0+slot*0x1B0;
+            memory.store<std::uint8_t>(record,2);memory.store<std::uint32_t>(record+0x104,actor);
+            for(const auto literal:{0x235BAC,0x235BFC}) {
+                const auto target=memory.load<std::uint32_t>(literal);
+                memory.store<std::uint32_t>(actor+0x5C,target);
+                reach(target);
+            }
+            memory.store<std::uint8_t>(record,0);
+        }
+        memory.store<std::uint8_t>(0x738DF0,2);memory.store<std::uint32_t>(0x738EF4,actor);
+        memory.store<std::uint32_t>(actor+0x5C,0x73900);
+        bool rejected=false;
+        try {reach(0x73900);}
+        catch(const NativeBoundary& boundary) {
+            rejected=std::string_view(boundary.what()).find("call target is outside its verified table")!=std::string_view::npos;
+            if(!rejected) throw;
+        }
+        require(rejected,"Actor dispatch admitted an unrelated compiled function");
+        memory.store<std::uint8_t>(0x738DF0,0);
+    });
     check("original main-game force integration at 30..1000 Hz",0x0008FE80,[&] {
         struct Restore {FrameStep saved=frame_step;~Restore(){frame_step=saved;}} restore;
         const auto store=[&](std::uint32_t address,float value){memory.store<std::uint32_t>(address,std::bit_cast<std::uint32_t>(value));};
@@ -393,16 +456,16 @@ std::string check_cpu(Xbe& image) {
     });
     check("stage group clocks and integer rotation retain fractional time",0x0007F520,[&] {
         struct Restore {FrameStep saved=frame_step;~Restore(){frame_step=saved;}} restore;
-        for(const unsigned rate:{60,75,120,144,165,240,360,1000}) for(const int speed:{-512,-1,0,1,257,1024}) {
+        for(const unsigned rate:{60,75,120,144,165,240,360,1000}) for(const int speed:{-3640,-512,-1,0,1,257,1024,3640}) {
             FrameCounter clock;std::uint32_t count=0;std::int32_t angle=0;double phase=0;
             frame_step={};clock.sample(0,0);
             for(unsigned frame=0;frame<rate*2;++frame) {
                 phase+=60.0/rate;const bool tick=phase>=1-1e-9;if(tick) {phase=std::max(0.0,phase-1);count+=speed;}
-                frame_step={60.0f/rate,static_cast<float>(phase),tick};
+                advance_frame_step(60.0f/rate,static_cast<float>(phase),tick);
                 clock.sample(count,speed);angle+=frame_integer_increment(speed);
             }
-            require(std::abs(clock.value-120.0*speed)<0.01,"Stage group clock depends on rendering rate");
-            require(std::abs(angle-120*speed)<=1,"Integer animation lost its fractional rotation");
+            require(std::abs(clock.value-120.0*speed)<0.00001*std::max(1,std::abs(speed)),"Stage group clock depends on rendering rate");
+            require(angle==120*speed,"Integer animation lost its fractional rotation");
             const auto paused=clock.value;
             for(unsigned frame=0;frame<rate;++frame) clock.sample(count,0);
             require(clock.value==paused,"Paused group animation advanced");
@@ -436,17 +499,33 @@ std::string check_cpu(Xbe& image) {
             require(cpu.registers[eax]==0 && memory.load<std::uint32_t>(output)==UINT32_MAX,"Goal query reported a crossing on one side of the plane");
         }
     });
-    check("original animation clock at 30..1000 Hz",0x00097D20,[&] {
+    check("original animation rule clock and end queries at 30..1000 Hz",0x00097D20,[&] {
         struct Restore {FrameStep saved=frame_step;~Restore(){frame_step=saved;}} restore;
         for(const unsigned rate:{30,60,120,144,165,240,360,1000}) {
+            const auto scene_rate=std::max(60U,rate);
             std::memset(memory.access(data,32),0,32);
             memory.store<std::uint16_t>(data+4,1000);
             memory.store<std::uint32_t>(data+8,std::bit_cast<std::uint32_t>(1.0f));
-            frame_step.delta=60.0f/rate;
-            for(unsigned frame=0;frame<rate*2;++frame) run(0x97D20,{std::bit_cast<std::uint32_t>(1.0f)},true,data,esi);
-            const auto time=std::bit_cast<float>(memory.load<std::uint32_t>(data+12));
-            require(std::isfinite(time) && std::abs(time-120)<0.01f,"Animation time depends on refresh rate");
+            for(unsigned scene=1;scene<=scene_rate*2;++scene) {
+                const auto ticks=scene*60/scene_rate;
+                advance_frame_step(60.0f/scene_rate,float(scene*60%scene_rate)/scene_rate,ticks!=(scene-1)*60/scene_rate);
+                run(0x97D20,{std::bit_cast<std::uint32_t>(1.0f)},true,data,esi);
+                require(std::bit_cast<float>(memory.load<std::uint32_t>(data+12))==float(ticks),"Animation playhead advanced outside its rule tick");
+            }
             require(memory.load<std::uint32_t>(data+8)==std::bit_cast<std::uint32_t>(1.0f),"Animation stepping changed its playback speed");
+        }
+        const auto actor=data+0x100,model=data+0x400;
+        memory.store<std::uint32_t>(actor+0xC,model);
+        memory.store<std::uint32_t>(actor+0x60,std::bit_cast<std::uint32_t>(-1.0f));
+        memory.store<std::uint32_t>(model+0x28,std::bit_cast<std::uint32_t>(3.0f));
+        memory.store<std::uint32_t>(model+0x2C,std::bit_cast<std::uint32_t>(2.5f));
+        memory.store<std::uint32_t>(model+0x48,std::bit_cast<std::uint32_t>(1.0f));
+        memory.store<std::uint32_t>(model+0x4C,std::bit_cast<std::uint32_t>(2.25f));
+        memory.store<std::uint32_t>(model+0x50,std::bit_cast<std::uint32_t>(3.0f));
+        for(const bool tick:{false,true}) {
+            advance_frame_step(0.5f,tick?0.0f:0.5f,tick);
+            require(run(0x9AEA0,{actor},true).registers[eax]==tick,"Clip completion escaped its rule tick");
+            require(run(0x9AED0,{actor},true).registers[eax]==tick,"Blend completion escaped its rule tick");
         }
     });
     check("continuous response preserves equal elapsed-time damping",0x000B3E21,[&] {

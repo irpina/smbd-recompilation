@@ -86,7 +86,7 @@ private:
     friend void native_frame_begin(Cpu&,Memory&);
     friend void native_stage_time(Cpu&,Memory&);
     friend void native_stage_group_time(Cpu&,Memory&);
-    friend void native_menu_layout(Cpu&,Memory&,bool);
+    friend void native_menu_layout(Cpu&,Memory&,std::uint32_t,bool);
     friend void native_sample_goals(Cpu&,Memory&);
     friend bool native_goal_query(Cpu&,Memory&,std::uint32_t);
     struct State;

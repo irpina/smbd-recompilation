@@ -67,3 +67,93 @@ validation, not a new gameplay session or an original-Xbox visual-parity claim.
 Independent viewport/clip-coordinate rules:
 https://learn.microsoft.com/en-us/windows/win32/direct3d9/viewports-and-clipping
 https://learn.microsoft.com/en-us/windows/win32/direct3d9/d3dviewport9
+
+Offscreen menu sprites (2026-11-03)
+
+Capture frame-1793745761688-57529182200 is Competition Mode's player-count
+setup, 21:9, 3x/MSAA8, same verified USA executable above. Draws337/338 are
+the unavailable one-player coin and face. Menu object7 at728FA8 has its
+original position/render position x=-200, y=220, callback2AAE40. Its emitted
+quad spans x=-264..-136. The original anchor320/scale3/4 places that entire
+quad at x=-118..-22, outside the native viewport. The 21:9 scale4/7 exposes
+it at x=-13.7143..59.4286. The menu's hiding convention, not an asset position
+or scene camera error, accounts for the stray icon.
+
+The initial75400 check preserved that visibility for individual sprites,
+but excluded font producers. The Name Entry follow-up below replaces it
+with a shared frontend completion rule. The original3/4 anchor visibility
+calculation remains; the sprite-only hook and its alternate cleanup branch
+have been removed. No menu IDs, texture IDs, parked-coordinate literals or
+replacement positions are used.
+
+Bounded original analyses and all native/replay evidence are under
+build/checks/ultrawide-menu. Native execution of6A1E0 changes201 draws to199,
+removing only coin/face draws114/115 in that request-time snapshot. All retained
+vertices, constants and recorded GPU state match exactly. Separate4:3 and
+16:9 probes preserve all201 draws and their state. Twenty-seven75400 cases
+compare visibility against the original16:9 producer's actual clip-space
+matrix, with anchors96/320/544, both screen edges, partial visibility and
+0/45/90-degree rotations. All pass and restore the temporary anchor.
+Character selection retains226 exact native draws. The HUD/minimap retains
+248 draws and byte-identical command-buffer pages; its baseline is the
+preceding0.2.0 release tool, including the earlier overlay fixes.
+
+Full offscreen replay on RTX5060Ti removes only captured draws337/338;
+422 draws complete with zero D3D11 errors. The original capture is untouched.
+The supplied frame already differs from its424-draw baseline replay by455
+RGB pixels. Repeating that unmodified replay changes11 pixels. Corrected
+versus repeated baseline changes59663 pixels, with three outside the coin
+region; this is not a pixel-identical replay claim. Exact native command
+comparisons, rather than a pixel tolerance, establish preserved sprite state.
+corrected-preview.png shows the derived replay fitted to21:9 for inspection.
+
+Game/tool builds pass with three workers,10632 native functions and zero
+unresolved sites. Existing CPU checks23 pass. Installer refreshed; local
+Defender scan reports no threats. No game session or computer use was run.
+The scratch recipes/checks are ignored build artifacts, not permanent tests.
+
+Name Entry prompt and shared primitive completion (2026-11-03)
+
+Capture frame-1793748230717-1041009899400, same verified executable and
+3x/MSAA8/21:9 settings. Captured draws437..472 are the parked confirmation
+prompt: shadowed text and outlined yes/no controls. Their x coordinates
+start at846, beyond the original anchored16:9 viewport, but inside the
+extended21:9 view. Fonts use their own31200/313E0/31430/313B0 producers and
+do not pass through75400, explaining the missing coverage in the first fix.
+
+complete_screen_primitives in src/cpu.cpp now applies visibility once at
+the shared313B0 completion, alongside the existing screen-edge alignment.
+It reads each complete quad using the actual XYZ/colour/UV stride. All four
+corners determine whether the original3/4 anchor transform hid the quad.
+Surviving quads and every attribute are compacted in order. Immediate
+inline-array headers and write cursors are updated; deferred batches also
+update their accumulated word count before original31170 emits them.
+Empty batches retain the original legal begin/end behaviour. Original
+state preparation, submission and cleanup still execute. The old75400
+hook is gone. Nothing identifies Name Entry, its prompt, glyphs or assets.
+
+Bounded original31150/31170/31200/313B0 and font analyses, snapshots, recipes
+and reports are in build/checks/ultrawide-name-entry. Native6A1E0 execution
+changes280 UI draws to244, removing only prompt draws244..279 in that
+snapshot, corresponding exactly to captured437..472. All retained vertices,
+constants and recorded GPU state match. Native4:3/16:9 retain289 exact draws;
+Competition retains199, character selection226 and HUD/minimap248, with
+identical retained state in every comparison. Twenty-seven rotated/anchored
+visibility cases pass again through the new shared completion.
+
+Thirty-five native packet cases cover five layouts (XYZ, packed colour,
+UV, colour+UV and two UV sets), mixed/empty/visible immediate and deferred
+batches, plus consecutive deferred completions. Surviving geometry/attributes,
+word counts, source cursors and final original-SDK submissions pass. Deferred
+BeginPush can prepend its own pending state, which is preserved and parsed;
+its stream is not assumed to start directly at the primitive header.
+The existing20 rectangle cases and23 CPU cases pass. No permanent tests
+or extra executables were added.
+
+The corrected full-frame replay retains437 draws with zero D3D11 errors
+on RTX5060Ti. corrected-preview.png fits it to21:9 and shows no stray prompt.
+Original capture files are untouched. Baseline replay differs from the
+supplied image by395 RGB pixels; this is not a pixel-identical replay or
+original-Xbox parity claim. Native state comparisons establish preservation.
+Game and tool rebuilt with three workers:10632 functions, zero unresolved
+sites. Installer refreshed. No game session or computer use was run.

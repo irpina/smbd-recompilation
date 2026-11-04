@@ -3,9 +3,11 @@ param(
     [switch]$AllowPartial,
     [ValidateRange(1,3)][int]$Workers = 3,
     [string]$CpuProfile,
-    [ValidateSet('All','Analysis','Game')][string]$Stage = 'All'
+    [switch]$LiveTiming,
+    [ValidateSet('All','Analysis','Game','Timing')][string]$Stage = 'All'
 )
 $ErrorActionPreference = 'Stop'
+if($LiveTiming -and $Stage -ne 'Timing') { throw '-LiveTiming requires -Stage Timing.' }
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $workflowTimer = [Diagnostics.Stopwatch]::StartNew()
 $succeeded = $false
@@ -136,6 +138,11 @@ try {
         Invoke-Checked (Join-Path $root 'build\windows\Release\smbd-tool.exe') @('check-cpu', 'data/local/default.xbe')
         Invoke-Checked (Join-Path $root 'build\windows\Release\smbd-tool.exe') @('check-input')
         Invoke-Checked (Join-Path $root 'build\windows\Release\smbd-tool.exe') @('check-audio')
+    }
+    if ($Stage -eq 'Timing') {
+        Invoke-Checked (Join-Path $root 'build\windows\Release\smbd-tool.exe') @('check-timing')
+        & (Join-Path $PSScriptRoot 'Audit-Timing.ps1')
+        if($LiveTiming) { & (Join-Path $PSScriptRoot 'Check-TimingLive.ps1') }
     }
     $succeeded = $true
 } finally {

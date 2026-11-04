@@ -1,0 +1,404 @@
+{
+  "format": "smbd-timing-cases-v1",
+  "source_sha256": "9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2",
+  "findings": [
+    {"id":"integer-turn-boundaries","status":"verified_fix","sites":["0x000A3059","0x000895B8","0x0010E4FB"],"cases":["goal-flight"],"evidence":"Shared integer increment now uses the actual previous phase. Original goal-flight path and independent quaternion rule reproduce the rounding failure at 75/1000 Hz and irregular intervals; other users share the helper but retain their own gameplay coverage obligations."},
+    {"id":"world-countdown","status":"verified_fix","sites":["0x000A80E2","0x000A80E3"],"cases":["world-countdown"],"evidence":"Positive signed WORLD+1C duration is a rule counter. Only its decrement is gated; traversal, responses and matrix construction remain per scene."},
+    {"id":"world-replay-response","status":"verified_fix","sites":["0x000A7DE8","0x000A7E11","0x000A7E15","0x000A7E1A","0x000A7EB6","0x000A7EE1","0x000A7EE5","0x000A7EEA"],"cases":["world-replay-relaxation","world-replay-target"],"evidence":"The original /4 response acts on signed angles. Fractional exponential response carries angle precision in the four verified WORLD records; both controllers are checked against independent formulas and original 60 Hz bytes."},
+    {"id":"world-existing-relaxation","status":"verified_fix","sites":["0x000A7D45","0x000A7D48","0x000A78C9","0x000A7AFD","0x000A7820"],"cases":["world-existing-relaxation","world-individual-reset"],"evidence":"Previous scaling at A7D1B/A7D2E still rounded signed tilt after every small step, losing up to 25.8 angle units in five ticks at 1000 Hz. Carry precision at the final store and invalidate it on original per-record initialization or transition to the vector/scripted controller; retain original full-tick bytes."},
+    {"id":"world-steering-response","status":"verified_fix","sites":["0x000A7F94","0x000A7FC1","0x000A8000"],"cases":["world-steering-neutral","world-steering-input","world-steering-clamped","world-steering-paused","world-steering-pause-resume","world-steering-reset"],"evidence":"Compose original .2 response and .8 decay before fractional iteration. Preserve original full-tick conversions; reset fractional history at the original four-record initializer. Numeric scope covers neutral/clamped input, opposite signs, pause and reset."},
+    {"id":"ball-size-expiry","status":"verified_fix","sites":["0x0008BC7C","0x0008BC90","0x0008BCA7","0x0008BCD1"],"cases":["ball-size","ball-size-expiration"],"evidence":"Use only the active part of an interval for shrinking; original expiry tick holds radius, then the trailing phase begins recovery. Every sample through expiry is checked."},
+    {"id":"info-initialization","status":"not_time_dependent","sites":["0x00013C43"],"cases":[],"evidence":"13B70 is the INFO initializer, reached via the event lifecycle. Its conditional 6C7D2C increment accompanies course initialization, not elapsed scene time. Bounded original analysis: timing/research/original/0x00013B70.json."},
+    {"id":"draw-depth-offset","status":"not_time_dependent","sites":["0x0001F4D3"],"cases":[],"evidence":"1F4C0 adjusts current draw-context +F8. 5A5A0 calls it with +0.5, draws the queue, then calls -0.5: a scoped drawing offset, not a velocity. Leave the original arithmetic intact."},
+    {"id":"draw-queue-allocation","status":"not_time_dependent","sites":["0x0001F53C","0x0001F642","0x0001F724","0x0001F784","0x0001F80F","0x0001F815"],"cases":[],"evidence":"1F4E0/1F570/1F660 clamp the computed draw depth bucket to count minus one. At 531AA..531CB the caller computes the bucket, reserves 0x14 bytes via 1F7E0 and inserts the packet via 1F770, which increments the draw-context count. 1F820 clears the list/count and restores the arena cursor and free bytes. None of these fields measure elapsed time."},
+    {"id":"storage-dialog-fade","status":"verified_fix","sites":["0x0001DD6D","0x0001DD6E","0x0001DD86","0x0001DD8A","0x0001DD9F","0x0001DDA1"],"cases":["dialog-opening","dialog-closing","dialog-clamped"],"evidence":"1DD10 mixes recurring drawing with 6D010C duration clamped to 0..8; alpha is count*0.1 at 1DDA5. Advance duration on rule ticks and sample alpha per scene, including the first opening fraction. Prefix probes stop explicitly at 74F10, before drawing; original 60 Hz counter and alpha bytes are pinned."},
+    {"id":"animation-blend-clock","status":"verified_fix","sites":["0x00097E0C","0x00097E13","0x00097E1C","0x0009C5B5","0x0009AEE0"],"cases":["animation-blend-in-progress","animation-blend-completion","animation-blend-clip-selection"],"evidence":"97E00 advances the elapsed clock on rule ticks and samples its original pre-increment weight per scene. At expiry the secondary clip flag and both clocks clear on the original tick. 9C540 and 9AED0 use the same active interval when selecting a clip or querying completion. Prefix probes pin weights, clock/flag bytes and the pending-clip branch; the CPU diagnostic checks the query."},
+    {"id":"animation-playhead-boundaries","status":"verified_fix","sites":["0x00097D28","0x00097D46","0x00097D80","0x00097DAD","0x00097DC1","0x00097DD9","0x00097DDE","0x00097DFA","0x00098B62","0x00098B71","0x00099319","0x0009932B","0x00099385","0x0009938F","0x0009AEC3","0x0009C59E"],"cases":["animation-clock","animation-forward-wrap","animation-reverse-wrap","animation-one-shot-completion","animation-fractional-speed-wrap"],"evidence":"97D20 keeps its full rule-tick increment for both bounds and wrap distance. 99300 samples the phase once per clip before its 98B50 bone loop. At high refresh the same pre-advance interval survives into intermediate scenes; loop counters and completion stay on the original rule. Prefix probes cover both pose inputs, forward and reverse restart, and one-shot hold. CPU diagnostics separately exercise the end queries."},
+    {"id":"animation-playhead-lifecycle","status":"verified_fix","sites":["0x00098962","0x0009ADED"],"cases":["animation-same-time-seek","animation-secondary-copy"],"evidence":"9ADE0 is an explicit seek even when the requested float equals the advanced playhead. It invalidates the prior sample. 98920 copies the outgoing track to the secondary blend slot and transfers its pose interval before 978E0 initializes the new primary track."},
+    {"id":"character-cue-clocks","status":"verified_fix","sites":["0x0009CBF0","0x0009CE60","0x0009CE99","0x0009D01A","0x000954FE","0x00095792","0x000957CC","0x0009590A"],"cases":["character-cue-clock","menu-character-cue-clock"],"evidence":"9C540 and 94F60 mix pose work with original PRNG rolls, cue state transitions and duration updates. Keep each cue's rolls, transitions, increments and decrements on rule ticks. Resume through the original saved-register cleanup and 98B20 model call. Captured-model prefixes check seed, cue start, expiry, misses and model argument across the schedule matrix."},
+    {"id":"character-blend-rate-limit","status":"verified_fix","sites":["0x0009541D","0x00095436","0x00095440","0x000954B7","0x000954D0","0x000954DA","0x000956B4","0x000956CD","0x000956D7","0x0009574D","0x00095766","0x00095770","0x0009CB1C","0x0009CB35","0x0009CB3F","0x0009CBA3","0x0009CBBC","0x0009CBC6","0x0009CD94","0x0009CDAD","0x0009CDB7","0x0009CE1B","0x0009CE34","0x0009CE3E"],"cases":["character-blend-rate-limit","menu-character-blend-rate-limit"],"evidence":"The original comparison and the signed step both use the three-unit 347B84 constant. Scale both by the scene interval in the menu and actor paths, so the target is reached at the same elapsed time. Captured-model prefixes cover both signs, intermediate samples and exact endpoint bytes."},
+    {"id":"text-box-reveal-and-scale","status":"verified_fix","sites":["0x0006BC95","0x0006BC96","0x0006BCB6","0x0006BBB3","0x0006BBF8"],"cases":["text-box-reveal","text-box-pause-resume","text-box-closing"],"evidence":"6BB60 advances its reveal clock and dispatches 6B8F0 once per original rule tick after the delay. The 0.1 and 0.15 scale and appearance gains compose across rendered scenes. Full calls with a real glyph queue check the original reveal ticks, cursor, terminator, pause and both scale paths."},
+    {"id":"text-glyph-bookkeeping","status":"not_time_dependent","sites":["0x0006ACA7","0x0006B964","0x0006B980","0x0006BA09","0x0006BA3A","0x0006BA63"],"cases":[],"evidence":"6AC40 clamps a parsed style index. 6B8F0 moves its ring indices, line number and width per parsed token. 6A850 counts glyphs before a delay escape; 6BA3A transitions the delay over those glyphs. The reveal caller owns elapsed time and these per-token operations retain their original arithmetic."},
+    {"id":"text-box-anchor-and-roll","status":"verified_fix","sites":["0x0006BB60","0x0006B520","0x0006BBC2","0x0006BC60","0x0006BC91","0x0006BCCC","0x0006BE2F","0x0006C1FA","0x0006C2B7"],"cases":["text-box-roll","text-box-anchored-placement"],"evidence":"The verified 6BB60 rule advances placement and the signed angular spring together. Fractional scenes evaluate the original placement against a private text-box copy, then sample that result for 6B520 drawing. The guest pose and the old relative vector used by the next rule are unchanged by drawing. Probes preserve detached pause/resume and captured anchored placement, velocity and roll through four original ticks."}
+  ],
+  "cases": [
+    {
+      "name": "effect-lifetime", "capture": "-", "ticks": 5,
+      "evidence": "4DB90: 4DBE6 lifetime; type 17 update/destructor BA870 is RET. true_refresh.txt, shared timing paths audit.",
+      "setup": ["write32 0x892114 0", "write32 0x6C93C0 1", "write32 0x6C93C4 0x3FE0000", "write32 0x3FE0000 2", "write32 0x6EB728 0", "write32 0x6EB730 17", "write32 0x6EB734 30"],
+      "update": ["call 0x4DB90 2000 0x3FF0000"],
+      "observe": [{"name":"lifetime","address":"0x6EB734","type":"i32","count":1,"rule":"countdown","initial":30,"tolerance":0}]
+    },
+    {
+      "name": "effect-paused", "capture": "-", "ticks": 5,
+      "evidence": "4DB90 checks pause mask 0A at 892114 before lifetime/update dispatch.",
+      "setup": ["write32 0x892114 8", "write32 0x6C93C0 1", "write32 0x6C93C4 0x3FE0000", "write32 0x3FE0000 2", "write32 0x6EB728 0", "write32 0x6EB730 17", "write32 0x6EB734 30"],
+      "update": ["call 0x4DB90 2000 0x3FF0000"],
+      "observe": [{"name":"lifetime","address":"0x6EB734","type":"i32","count":1,"rule":"constant","expected":[30],"tolerance":0}]
+    },
+    {
+      "name": "ball-size", "capture": "-", "ticks": 5,
+      "evidence": "8BC40: target half-size under flag 2; shrink response 0.3 at 8BCD1 and recovery 0.2 at 8BC7C; DEC duration at 8BC90. 60 Hz bytes from existing original-routine probe.",
+      "setup": ["write32 0x3FE0068 0x3F800000", "write32 0x3FE014C 0x3F800000", "write32 0x3FE0148 15", "write32 0x3FE009C 2", "write32 0x3FE0104 0"],
+      "update": ["reg ecx 0x3FE0000", "call 0x8BC40 1000 0x3FF0000"],
+      "observe": [
+        {"name":"radius","address":"0x3FE0068","type":"f32","count":1,"rule":"response","initial":1,"target":0.5,"retention":0.7,"tolerance":0.000002,"baseline_bytes":"5183153F"},
+        {"name":"duration","address":"0x3FE0148","type":"i32","count":1,"rule":"countdown","initial":15,"tolerance":0}
+      ]
+    },
+    {
+      "name": "ball-freefall", "capture": "-", "ticks": 5,
+      "evidence": "8A2C0 original semi-implicit Euler: velocity += force; position += velocity. +9C flag 1 selects world gravity without a stage transform.",
+      "setup": ["write32 0x3FE0004 0x40000000", "write32 0x3FE0008 0x41A00000", "write32 0x3FE000C 0xC0400000", "write32 0x3FE001C 0x3E99999A", "write32 0x3FE0020 0xBECCCCCD", "write32 0x3FE0024 0x3E4CCCCD", "write32 0x3FE006C 0x3C23D70A", "write32 0x3FE009C 1"],
+      "update": ["call 0x8A2C0 2000 0x3FF0000 0x3FE0000"],
+      "observe": [
+        {"name":"position","address":"0x3FE0004","type":"f32","count":3,"rule":"euler","initial":[2,20,-3],"speed":[0.3,-0.4,0.2],"acceleration":[0,-0.01,0],"tolerance":0.0002},
+        {"name":"velocity","address":"0x3FE001C","type":"f32","count":3,"rule":"linear","initial":[0.3,-0.4,0.2],"speed":[0,-0.01,0],"tolerance":0.00001}
+      ]
+    },
+    {
+      "name": "animation-clock", "capture": "-", "ticks": 5,
+      "evidence": "97D20 advances the original +C playhead on rule ticks. Long clip isolates clock advancement and original +8 speed; pose sampling is tested separately.",
+      "setup": ["write32 0x3FE0004 1000", "write32 0x3FE0008 0x3F800000", "write32 0x3FE000C 0"],
+      "update": ["reg esi 0x3FE0000", "call 0x97D20 1000 0x3FF0000 0x3F800000"],
+      "observe": [
+        {"name":"clock","address":"0x3FE000C","type":"f32","count":1,"rule":"counter","initial":0,"speed":1,"minimum":0,"maximum":1000,"tolerance":0,"baseline_bytes":"0000A040"},
+        {"name":"stored-speed","address":"0x3FE0008","type":"f32","count":1,"rule":"constant","expected":[1],"tolerance":0}
+      ]
+    },
+    {
+      "name": "animation-forward-wrap", "capture": "-", "ticks": 6,
+      "evidence": "97D6C branches strictly above frame 3. 97DAD and 97DB9 commit one loop and frame 0 on tick four. 99300 samples the primary clip before that advancement. Break at the root's 27EC0 and read the pose time spilled by 98B86, then run the original clock update.",
+      "setup": ["write32 0x3FE0000 1", "write32 0x3FE0004 0x3F800000", "write32 0x3FE0008 0x3FE1000", "write32 0x3FE1004 0xFFFF0000", "write32 0x3FE0044 3", "write32 0x3FE0048 0x3F800000"],
+      "update": ["write32 0x6DD634 0x3FE5000", "call-until 0x99300 0x27EC0 1000 0x3FF0000 0x3FE0000", "reg esi 0x3FE0040", "call 0x97D20 1000 0x3FD0000 0x3F800000"],
+      "observe": [
+        {"name":"pose-time","address":"0x3FEFFF0","type":"f32","count":1,"rule":"tick-sequence","expected":[0,0,1,2,3,0,1],"phase_speeds":[0,1,1,1,0,1],"tolerance":0.000002,"baseline_bytes":"0000803F"},
+        {"name":"playhead","address":"0x3FE004C","type":"f32","count":1,"rule":"tick-sequence","expected":[0,1,2,3,0,1,2],"tolerance":0,"baseline_bytes":"00000040"},
+        {"name":"loop-count","address":"0x3FE0054","type":"u16","count":1,"rule":"tick-sequence","expected":[0,0,0,0,1,1,1],"tolerance":0,"baseline_bytes":"0100"}
+      ]
+    },
+    {
+      "name": "animation-reverse-wrap", "capture": "-", "ticks": 6,
+      "evidence": "Use the secondary clip first at 9932B, with speed -1 and bounds 0..3. 97DC5 wraps strictly below zero, restarts at three and increments the loop count on tick four. 98B62 supplies the secondary pose input.",
+      "setup": ["write32 0x3FE0000 0x00010001", "write32 0x3FE0004 0x3F800000", "write32 0x3FE0008 0x3FE1000", "write32 0x3FE1004 0xFFFF0000", "write32 0x3FE005C 3", "write32 0x3FE0060 0xBF800000", "write32 0x3FE0064 0x40400000"],
+      "update": ["write32 0x6DD634 0x3FE5000", "call-until 0x99300 0x27EC0 1000 0x3FF0000 0x3FE0000", "reg esi 0x3FE0058", "call 0x97D20 1000 0x3FD0000 0x3F800000"],
+      "observe": [
+        {"name":"pose-time","address":"0x3FEFFF0","type":"f32","count":1,"rule":"tick-sequence","expected":[3,3,2,1,0,3,2],"phase_speeds":[0,-1,-1,-1,0,-1],"tolerance":0.000002,"baseline_bytes":"00000040"},
+        {"name":"playhead","address":"0x3FE0064","type":"f32","count":1,"rule":"tick-sequence","expected":[3,2,1,0,3,2,1],"tolerance":0,"baseline_bytes":"0000803F"},
+        {"name":"loop-count","address":"0x3FE006C","type":"u16","count":1,"rule":"tick-sequence","expected":[0,0,0,0,1,1,1],"tolerance":0,"baseline_bytes":"0100"}
+      ]
+    },
+    {
+      "name": "animation-one-shot-completion", "capture": "-", "ticks": 6,
+      "evidence": "Flag 1 chooses the one-shot path at 97D70. 97D75 sets completion bit 2 on tick four and 97D78 clamps the playhead at 3. Check the following held pose through 99300's actual primary pose input.",
+      "setup": ["write32 0x3FE0000 1", "write32 0x3FE0004 0x3F800000", "write32 0x3FE0008 0x3FE1000", "write32 0x3FE1004 0xFFFF0000", "write32 0x3FE0040 1", "write32 0x3FE0044 3", "write32 0x3FE0048 0x3F800000"],
+      "update": ["write32 0x6DD634 0x3FE5000", "call-until 0x99300 0x27EC0 1000 0x3FF0000 0x3FE0000", "reg esi 0x3FE0040", "call 0x97D20 1000 0x3FD0000 0x3F800000"],
+      "observe": [
+        {"name":"pose-time","address":"0x3FEFFF0","type":"f32","count":1,"rule":"tick-sequence","expected":[0,0,1,2,3,3,3],"phase_speeds":[0,1,1,1,0,0],"tolerance":0.000002,"baseline_bytes":"00004040"},
+        {"name":"playhead","address":"0x3FE004C","type":"f32","count":1,"rule":"tick-sequence","expected":[0,1,2,3,3,3,3],"tolerance":0,"baseline_bytes":"00004040"},
+        {"name":"end-flag","address":"0x3FE0040","type":"u16","count":1,"rule":"tick-sequence","expected":[1,1,1,1,3,3,3],"tolerance":0,"baseline_bytes":"0300"}
+      ]
+    },
+    {
+      "name": "animation-fractional-speed-wrap", "capture": "-", "ticks": 5,
+      "evidence": "Original increment is clip speed 1.5 times model factor 0.5. At tick four the tentative position 3.25 exceeds 3. 97D9C subtracts end + 0.75 - restart, leaving 1.5 and publishing lower bound 2, then the next step advances to 2.25.",
+      "setup": ["write32 0x3FE0000 0", "write32 0x3FE0004 0x00020003", "write32 0x3FE0008 0x3FC00000", "write32 0x3FE000C 0x3E800000"],
+      "update": ["reg esi 0x3FE0000", "call 0x97D20 1000 0x3FF0000 0x3F000000"],
+      "observe": [
+        {"name":"playhead","address":"0x3FE000C","type":"f32","count":1,"rule":"tick-sequence","expected":[0.25,1,1.75,2.5,1.5,2.25],"tolerance":0,"baseline_bytes":"00001040"},
+        {"name":"lower-bound","address":"0x3FE0002","type":"u16","count":1,"rule":"tick-sequence","expected":[0,0,0,0,2,2],"tolerance":0,"baseline_bytes":"0200"}
+      ]
+    },
+    {
+      "name": "animation-same-time-seek", "capture": "-", "ticks": 1,
+      "evidence": "Advance the primary track from 0 to 1 on a setup tick, then call the original 9ADE0 seek to exactly 1. An identical raw value is still a seek and must discard the prior pose interval.",
+      "setup": ["write32 0x3FE0000 1", "write32 0x3FE0004 0x3F800000", "write32 0x3FE0008 0x3FE1000", "write32 0x3FE1004 0xFFFF0000", "write32 0x3FE0044 3", "write32 0x3FE0048 0x3F800000", "write32 0x3FE200C 0x3FE0000", "step 0x3F800000 0 1", "reg esi 0x3FE0040", "call 0x97D20 1000 0x3FD0000 0x3F800000", "call 0x9ADE0 1000 0x3FD0000 0x3FE2000 0x3F800000"],
+      "update": ["write32 0x6DD634 0x3FE5000", "call-until 0x99300 0x27EC0 1000 0x3FF0000 0x3FE0000"],
+      "observe": [{"name":"pose-time","address":"0x3FEFFF0","type":"f32","count":1,"rule":"constant","expected":[1],"tolerance":0,"baseline_bytes":"0000803F"}]
+    },
+    {
+      "name": "animation-secondary-copy", "capture": "-", "ticks": 1,
+      "evidence": "98920 copies the outgoing primary track to the blend slot. The new clip header has three frames and no keyed channels. Run the original initializer and sample the secondary track; its outgoing 0..1 interval must survive the copy.",
+      "setup": ["write32 0x3FE0000 1", "write32 0x3FE0004 0x3F800000", "write32 0x3FE0008 0x3FE1000", "write32 0x3FE1004 0xFFFF0000", "write32 0x3FE0024 0x3FE2000", "write32 0x3FE2008 0x3FE2100", "write32 0x3FE2100 3", "write32 0x3FE0044 3", "write32 0x3FE0048 0x3F800000", "step 0x3F800000 0 1", "reg esi 0x3FE0040", "call 0x97D20 1000 0x3FD0000 0x3F800000", "call 0x98920 1000 0x3FD0000 0x3FE0000 0 0 3 2"],
+      "update": ["write32 0x6DD634 0x3FE5000", "call-until 0x99300 0x27EC0 1000 0x3FF0000 0x3FE0000"],
+      "observe": [
+        {"name":"secondary-playhead","address":"0x3FE0064","type":"f32","count":1,"rule":"constant","expected":[1],"tolerance":0,"baseline_bytes":"0000803F"},
+        {"name":"secondary-pose","address":"0x3FEFFF0","type":"f32","count":1,"rule":"tick-sequence","expected":[0,1],"phase_speeds":[1],"tolerance":0.000002,"baseline_bytes":"0000803F"}
+      ]
+    },
+    {
+      "name": "animation-blend-in-progress", "capture": "-", "ticks": 2,
+      "evidence": "97E00 samples elapsed/duration before the original +1 at 97E1C. Stop at the root's 28440 transform call and read the weight spilled at 97E24.",
+      "setup": ["write32 0x3FE0000 0x00010001", "write32 0x3FE0008 0x3FE0100", "write32 0x3FE0028 0", "write32 0x3FE002C 0x40400000"],
+      "update": ["reg edi 0x3FE0000", "call-until 0x97E00 0x28440 1000 0x3FF0000"],
+      "observe": [
+        {"name":"elapsed","address":"0x3FE0028","type":"f32","count":1,"rule":"counter","initial":0,"speed":1,"minimum":0,"maximum":3,"tolerance":0,"baseline_bytes":"00000040"},
+        {"name":"weight","address":"0x3FEFFDC","type":"f32","count":1,"rule":"clamped-linear","initial":0,"start":1,"speed":0.3333333333333333,"minimum":0,"maximum":1,"tolerance":0.000001,"baseline_bytes":"ABAAAA3E"}
+      ]
+    },
+    {
+      "name": "animation-blend-completion", "capture": "-", "ticks": 5,
+      "evidence": "97E0C takes the original completion path after elapsed reaches duration, clearing the secondary clip flag and both clock fields. A 2.5-tick duration first completes on the fourth rule tick.",
+      "setup": ["write32 0x3FE0000 0x00010001", "write32 0x3FE0008 0x3FE0100", "write32 0x3FE0028 0", "write32 0x3FE002C 0x40200000"],
+      "update": ["reg edi 0x3FE0000", "call-until 0x97E00 0x28440 1000 0x3FF0000"],
+      "observe": [
+        {"name":"elapsed","address":"0x3FE0028","type":"f32","count":1,"rule":"tick-sequence","expected":[0,1,2,3,0,0],"tolerance":0,"baseline_bytes":"00000000"},
+        {"name":"duration","address":"0x3FE002C","type":"f32","count":1,"rule":"tick-sequence","expected":[2.5,2.5,2.5,2.5,0,0],"tolerance":0,"baseline_bytes":"00000000"},
+        {"name":"secondary-clip","address":"0x3FE0002","type":"u16","count":1,"rule":"tick-sequence","expected":[1,1,1,1,0,0],"tolerance":0,"baseline_bytes":"0000"},
+        {"name":"weight","address":"0x3FEFFDC","type":"f32","count":1,"rule":"clamped-linear","initial":0,"start":1,"speed":0.4,"minimum":0,"maximum":1,"tolerance":0.000001,"baseline_bytes":"0000803F"}
+      ]
+    },
+    {
+      "name": "animation-blend-clip-selection", "capture": "-", "ticks": 1,
+      "evidence": "9C5AF compares the same elapsed/duration fields. Without a pending duration override (+60 is -1), a pending clip reaches 9C5F8's marker reset after expiry. Exercise both paths up to 932F0, before model drawing.",
+      "setup": ["write32 0x3FE0000 0x3FE0300", "write32 0x3FE000C 0x3FE0600", "write32 0x3FE0060 0xBF800000", "write32 0x3FE007C 1", "write32 0x3FE0304 0x3FE0900", "write32 0x3FE0308 0x3FE0600", "write32 0x3FE0324 0x00010000", "write32 0x3FE0328 0x3FE0A00", "write32 0x3FE0628 0x40400000", "write32 0x3FE062C 0x40200000"],
+      "update": ["call-until 0x9C540 0x932F0 1000 0x3FF0000 0x3FE0000"],
+      "observe": [{"name":"clip-change-marker","address":"0x3FE008C","type":"u32","count":1,"rule":"tick-sequence","expected":[0,4294967295],"tolerance":0,"baseline_bytes":"FFFFFFFF"}]
+    },
+    {
+      "name": "character-cue-clock", "capture": "build/checks/replay-timing/fixed-144-capture", "ticks": 16,
+      "snapshot_sha256": "56DE16BA2E976175647795116BAEC967319CFAD60E93227F64BFA2529B877CD1",
+      "evidence": "9C540 uses 30B60C's original per-thread seed. Seed one gives 41, starts the 14-tick +AC cue and decrements it on the same tick. At expiry two eligible misses per tick advance the original 343FD*seed+269EC3 sequence. Stop at 98B20 and verify the model argument too.",
+      "setup": ["reg fs_base 0x3FE8000", "write32 0x3FE8024 0", "write32 0x3FE8028 0x3FE9000", "write32 0x3FE9028 0", "write32 0xA60004 0x3FEA000", "write32 0x3FEA014 1", "write32 0x1B3EBC8 0", "write32 0x1B3EBCC 0"],
+      "update": ["call-until 0x9C540 0x98B20 12000 0x3FF0000 0x1B3EB20"],
+      "observe": [
+        {"name":"random-seed","address":"0x3FEA014","type":"u32","count":1,"rule":"tick-sequence","expected":[1,2745024,2745024,2745024,2745024,2745024,2745024,2745024,2745024,2745024,2745024,2745024,2745024,2745024,2745024,415139642,3403800452],"tolerance":0,"baseline_bytes":"84DFE1CA"},
+        {"name":"duration","address":"0x1B3EBCC","type":"i32","count":1,"rule":"tick-sequence","expected":[0,13,12,11,10,9,8,7,6,5,4,3,2,1,0,0,0],"tolerance":0,"baseline_bytes":"00000000"},
+        {"name":"advance-model","address":"0x3FEFFE4","type":"u32","count":1,"rule":"constant","expected":[44749440],"tolerance":0,"baseline_bytes":"80D2AA02"}
+      ]
+    },
+    {
+      "name": "menu-character-cue-clock", "capture": "build/checks/replay-timing/fixed-144-capture", "ticks": 16,
+      "snapshot_sha256": "56DE16BA2E976175647795116BAEC967319CFAD60E93227F64BFA2529B877CD1",
+      "evidence": "Bind slot zero to the captured owner and populate the original menu model slots from the same actor's model pointers. 95898 starts the 14-tick 73A500 cue from the same seed; 958FB decrements it immediately. The next two eligible rolls are misses. Stop at 98B20 with the original selected model.",
+      "setup": ["reg fs_base 0x3FE8000", "write32 0x3FE8024 0", "write32 0x3FE8028 0x3FE9000", "write32 0x3FE9028 0", "write32 0xA60004 0x3FEA000", "write32 0x3FEA014 1", "write32 0x73B0E8 0x02AB6720", "write32 0x73B284 0x02AA1000", "write32 0x73A6CC 0x02AAD280", "write32 0x73A61C 0x01B36000", "write32 0x73B19C 0x02AA33A0"],
+      "update": ["call-until 0x94F60 0x98B20 12000 0x3FF0000"],
+      "observe": [
+        {"name":"random-seed","address":"0x3FEA014","type":"u32","count":1,"rule":"tick-sequence","expected":[1,2745024,2745024,2745024,2745024,2745024,2745024,2745024,2745024,2745024,2745024,2745024,2745024,2745024,2745024,3357800067,415139642],"tolerance":0,"baseline_bytes":"3A87BE18"},
+        {"name":"duration","address":"0x73A500","type":"i32","count":1,"rule":"tick-sequence","expected":[0,13,12,11,10,9,8,7,6,5,4,3,2,1,0,0,0],"tolerance":0,"baseline_bytes":"00000000"},
+        {"name":"advance-model","address":"0x3FEFFE4","type":"u32","count":1,"rule":"constant","expected":[44749440],"tolerance":0,"baseline_bytes":"80D2AA02"}
+      ]
+    },
+    {
+      "name": "character-blend-rate-limit", "capture": "build/checks/replay-timing/fixed-144-capture", "ticks": 8,
+      "snapshot_sha256": "56DE16BA2E976175647795116BAEC967319CFAD60E93227F64BFA2529B877CD1",
+      "evidence": "In the captured actor 920B0 returns stable targets -1.11097288131714 and +1.11097288131714 with its playhead held at the prefix boundary. The original active-blend path moves at most three units per tick. Start one field far away and the other two units below target to test both the increment and the snap threshold.",
+      "setup": ["reg fs_base 0x3FE8000", "write32 0x3FE8024 0", "write32 0x3FE8028 0x3FE9000", "write32 0x3FE9028 0", "write32 0xA60004 0x3FEA000", "write32 0x3FEA014 1", "write32 0x1B3EBD4 0x41A00000", "write32 0x1B3EBD8 0xBF639748", "write32 0x2AAD2A8 0", "write32 0x2AAD2AC 0x41F00000"],
+      "update": ["call-until 0x9C540 0x98B20 12000 0x3FF0000 0x1B3EB20"],
+      "observe": [
+        {"name":"falling-weight","address":"0x1B3EBD4","type":"f32","count":1,"rule":"clamped-linear","initial":20,"speed":-3,"minimum":-1.11097288131714,"maximum":20,"tolerance":0.00005,"baseline_bytes":"5C348EBF"},
+        {"name":"rising-weight","address":"0x1B3EBD8","type":"f32","count":1,"rule":"clamped-linear","initial":-0.889027118682861,"speed":3,"minimum":-0.889027118682861,"maximum":1.11097288131714,"tolerance":0.00005,"baseline_bytes":"5C348E3F"}
+      ]
+    },
+    {
+      "name": "menu-character-blend-rate-limit", "capture": "build/checks/replay-timing/fixed-144-capture", "ticks": 8,
+      "snapshot_sha256": "56DE16BA2E976175647795116BAEC967319CFAD60E93227F64BFA2529B877CD1",
+      "evidence": "The populated menu slots select the same captured channel samples. 94F60 uses 347B84 for both the three-unit step and the comparison against the remaining distance, just as the actor path does. Exercise both signs and arrival at target.",
+      "setup": ["reg fs_base 0x3FE8000", "write32 0x3FE8024 0", "write32 0x3FE8028 0x3FE9000", "write32 0x3FE9028 0", "write32 0xA60004 0x3FEA000", "write32 0x3FEA014 1", "write32 0x73B0E8 0x02AB6720", "write32 0x73B284 0x02AA1000", "write32 0x73A6CC 0x02AAD280", "write32 0x73A61C 0x01B36000", "write32 0x73B19C 0x02AA33A0", "write32 0x73B2B0 0x41A00000", "write32 0x73B2B4 0xBF639748", "write32 0x2AAD2A8 0", "write32 0x2AAD2AC 0x41F00000"],
+      "update": ["call-until 0x94F60 0x98B20 12000 0x3FF0000"],
+      "observe": [
+        {"name":"falling-weight","address":"0x73B2B0","type":"f32","count":1,"rule":"clamped-linear","initial":20,"speed":-3,"minimum":-1.11097288131714,"maximum":20,"tolerance":0.00005,"baseline_bytes":"5C348EBF"},
+        {"name":"rising-weight","address":"0x73B2B4","type":"f32","count":1,"rule":"clamped-linear","initial":-0.889027118682861,"speed":3,"minimum":-0.889027118682861,"maximum":1.11097288131714,"tolerance":0.00005,"baseline_bytes":"5C348E3F"}
+      ]
+    },
+    {
+      "name": "text-box-reveal", "capture": "-", "ticks": 5,
+      "evidence": "6BC96 increments the reveal clock and 6BCB0 compares it divided by 60 with the 0.025-second delay. The real 6B8F0 parser enqueues one glyph and advances the cursor each eligible tick, beginning on tick two. A three-glyph string and eight-entry queue exercise the terminator too.",
+      "setup": ["write32 0x892114 0", "write32 0x6C934C 0", "write32 0x6C7F48 0x42700000", "write32 0x3FE0008 2", "write32 0x3FE006C 0x3CCCCCCD", "write32 0x3FE0070 0x3CCCCCCD", "write32 0x3FE0088 8", "write32 0x3FE0090 0x3FE3000", "write32 0x3FE0094 0x3FE1000", "write32 0x3FE0098 0x3FE2000", "write32 0x3FE1024 0x3F800000", "write32 0x3FE1028 0x3F800000", "write32 0x3FE2000 0x00434241"],
+      "update": ["call 0x6BB60 12000 0x3FF0000 0x3FE0000"],
+      "observe": [
+        {"name":"clock","address":"0x3FE0000","type":"u32","count":1,"rule":"counter","initial":0,"speed":1,"minimum":0,"maximum":5,"tolerance":0,"baseline_bytes":"05000000"},
+        {"name":"text-cursor","address":"0x3FE0098","type":"u32","count":1,"rule":"tick-sequence","expected":[66985984,66985984,66985985,66985986,66985987,66985987],"tolerance":0,"baseline_bytes":"0320FE03"},
+        {"name":"glyph-count","address":"0x3FE008C","type":"u16","count":1,"rule":"tick-sequence","expected":[0,0,1,2,3,3],"tolerance":0,"baseline_bytes":"0300"},
+        {"name":"box-scale","address":"0x3FE0034","type":"f32","count":2,"rule":"response","initial":0,"target":1,"retention":0.9,"tolerance":0.000002,"baseline_bytes":"4CABD13E4CABD13E"},
+        {"name":"appearance","address":"0x3FE0058","type":"f32","count":2,"rule":"response","initial":0,"target":1,"retention":0.9,"tolerance":0.000002,"baseline_bytes":"4CABD13E4CABD13E"}
+      ]
+    },
+    {
+      "name": "text-box-pause-resume", "capture": "-", "ticks": 5,
+      "evidence": "6BB60 returns on pause mask 0A before touching any text state. Pause for the third tick after the first glyph; compare the whole opening response and reveal cursor before and after resume.",
+      "setup": ["write32 0x892114 0", "write32 0x6C934C 0", "write32 0x6C7F48 0x42700000", "write32 0x3FE0008 2", "write32 0x3FE006C 0x3CCCCCCD", "write32 0x3FE0070 0x3CCCCCCD", "write32 0x3FE0088 8", "write32 0x3FE0090 0x3FE3000", "write32 0x3FE0094 0x3FE1000", "write32 0x3FE0098 0x3FE2000", "write32 0x3FE1024 0x3F800000", "write32 0x3FE1028 0x3F800000", "write32 0x3FE2000 0x00434241"],
+      "actions": [{"tick":2,"commands":["write32 0x892114 8"]},{"tick":3,"commands":["write32 0x892114 0"]}],
+      "update": ["call 0x6BB60 12000 0x3FF0000 0x3FE0000"],
+      "observe": [
+        {"name":"clock","address":"0x3FE0000","type":"u32","count":1,"rule":"tick-sequence","expected":[0,1,2,2,3,4],"tolerance":0,"baseline_bytes":"04000000"},
+        {"name":"text-cursor","address":"0x3FE0098","type":"u32","count":1,"rule":"tick-sequence","expected":[66985984,66985984,66985985,66985985,66985986,66985987],"tolerance":0,"baseline_bytes":"0320FE03"},
+        {"name":"box-scale","address":"0x3FE0034","type":"f32","count":2,"rule":"response-stages","initial":0,"stages":[{"until":2,"target":1,"retention":0.9},{"until":3,"target":1,"retention":1},{"until":5,"target":1,"retention":0.9}],"tolerance":0.000002,"baseline_bytes":"A913B03EA913B03E"}
+      ]
+    },
+    {
+      "name": "text-box-closing", "capture": "-", "ticks": 5,
+      "evidence": "Without flag 2 the two scale fields approach the original -0.01 target at 6BBF0 with gain 0.15. The two appearance fields still approach one with gain 0.1. A long reveal delay isolates this response.",
+      "setup": ["write32 0x892114 0", "write32 0x6C934C 0", "write32 0x6C7F48 0x42700000", "write32 0x3FE006C 0x42C80000", "write32 0x3FE0094 0x3FE1000", "write32 0x3FE0034 0x3F800000", "write32 0x3FE0038 0x3F800000", "write32 0x3FE0058 0x3E800000", "write32 0x3FE005C 0x3E800000"],
+      "update": ["call 0x6BB60 12000 0x3FF0000 0x3FE0000"],
+      "observe": [
+        {"name":"box-scale","address":"0x3FE0034","type":"f32","count":2,"rule":"response","initial":1,"target":-0.01,"retention":0.85,"tolerance":0.000002,"baseline_bytes":"3354E03E3354E03E"},
+        {"name":"appearance","address":"0x3FE0058","type":"f32","count":2,"rule":"response","initial":0.25,"target":1,"retention":0.9,"tolerance":0.000002,"baseline_bytes":"3CA00E3F3CA00E3F"}
+      ]
+    },
+    {
+      "name": "text-box-roll", "capture": "-", "ticks": 6,
+      "evidence": "6C2D8 loads signed angular velocity and 6C2FC/6C300 store damped velocity and add it to roll. In the unanchored case start at velocity 100 and roll zero; the original five-tick trace includes the restoring sine force. Pause for the third tick and verify every original sample through resume.",
+      "setup": ["write32 0x892114 0", "write32 0x6C934C 0", "write32 0x6C7F48 0x42700000", "write32 0x3FE0004 100", "write32 0x3FE0008 2", "write32 0x3FE006C 0x42C80000", "write32 0x3FE0094 0x3FE1000", "write32 0x3FE1024 0x3F800000", "write32 0x3FE1028 0x3F800000"],
+      "actions": [{"tick":2,"commands":["write32 0x892114 8"]},{"tick":3,"commands":["write32 0x892114 0"]}],
+      "update": ["call 0x6BB60 12000 0x3FF0000 0x3FE0000"],
+      "observe": [
+        {"name":"velocity","address":"0x3FE0004","type":"i16","count":1,"rule":"tick-sequence","expected":[100,92,75,75,53,28,2],"tolerance":0,"baseline_bytes":"0200"},
+        {"name":"roll","address":"0x3FE0060","type":"i16","count":1,"rule":"tick-sequence","expected":[0,92,167,167,220,248,250],"tolerance":0,"baseline_bytes":"FA00"}
+      ]
+    },
+    {
+      "name": "text-box-anchored-placement", "capture": "build/checks/replay-timing/fixed-144-capture", "ticks": 4,
+      "snapshot_sha256": "56DE16BA2E976175647795116BAEC967319CFAD60E93227F64BFA2529B877CD1",
+      "evidence": "Attach the text box to the captured character. Enable projection constraints and angular impulse with descriptor words +8,+10,+1C. Settled extents isolate placement. Pin each original 60 Hz position and anchor bit pattern, including the first impulse from the initial zero vector and the following signed response.",
+      "setup": ["write32 0x892114 0", "write32 0x6C934C 0", "write32 0x6C7F48 0x42700000", "write32 0x3FE0008 2", "write32 0x3FE000C 0x01B3EB20", "write32 0x3FE002C 0x42C80000", "write32 0x3FE0030 0x42480000", "write32 0x3FE0034 0x3F800000", "write32 0x3FE0038 0x3F800000", "write32 0x3FE0058 0x3F800000", "write32 0x3FE005C 0x3F800000", "write32 0x3FE006C 0x42C80000", "write32 0x3FE0094 0x3FE1000", "write32 0x3FE1008 1", "write32 0x3FE1010 1", "write32 0x3FE101C 1", "write32 0x3FE1024 0x3F800000", "write32 0x3FE1028 0x3F800000"],
+      "update": ["call 0x6BB60 12000 0x3FF0000 0x3FE0000"],
+      "observe": [
+        {"name":"box-x","address":"0x3FE0020","type":"u32","count":1,"rule":"tick-sequence","expected":[0,1100611051,1111270362,1117495494,1121455662],"tolerance":0,"baseline_bytes":"2E0ED842"},
+        {"name":"box-y","address":"0x3FE0024","type":"u32","count":1,"rule":"tick-sequence","expected":[0,1099864533,1110355877,1116741045,1120408275],"tolerance":0,"baseline_bytes":"D312C842"},
+        {"name":"anchor-x","address":"0x3FE0040","type":"u32","count":1,"rule":"tick-sequence","expected":[0,1124094873,1129140878,1132168481,1133223562],"tolerance":0,"baseline_bytes":"8A9E8B43"},
+        {"name":"anchor-y","address":"0x3FE0044","type":"u32","count":1,"rule":"tick-sequence","expected":[0,1122872077,1128145521,1130949169,1132546719],"tolerance":0,"baseline_bytes":"9F4A8143"},
+        {"name":"velocity","address":"0x3FE0004","type":"i16","count":1,"rule":"tick-sequence","expected":[0,1884,1564,1132,640],"tolerance":0,"baseline_bytes":"8002"},
+        {"name":"roll","address":"0x3FE0060","type":"i16","count":1,"rule":"tick-sequence","expected":[0,1884,3448,4580,5220],"tolerance":0,"baseline_bytes":"6414"}
+      ]
+    },
+    {
+      "name": "world-countdown", "capture": "-", "ticks": 5,
+      "evidence": "A8060: A80D9 reads WORLD+1C, positive counter decremented at A80E2 then stored at A80E3. Status and per-player traversal are distinct from this duration.",
+      "setup": ["write32 0x6C9380 1", "write32 0x6C9384 0x3FE0000", "write32 0x3FE0000 2", "write32 0x73E938 0", "write32 0x73E94C 30", "write32 0x6C9328 0", "write32 0x6C932C 0"],
+      "update": ["call 0xA8060 2000 0x3FF0000"],
+      "observe": [{"name":"duration","address":"0x73E94C","type":"i16","count":1,"rule":"countdown","initial":30,"tolerance":0}]
+    },
+    {
+      "name": "world-replay-relaxation", "capture": "build/checks/replay-timing/fixed-144-capture", "ticks": 5,
+      "snapshot_sha256": "56DE16BA2E976175647795116BAEC967319CFAD60E93227F64BFA2529B877CD1",
+      "evidence": "A7DA0: signed 16-bit tilt decays by arithmetic shift /4 at A7DE8/A7E11; runs from continuous WORLD A8060. Start 16384 makes all five original integer updates exact.",
+      "setup": ["write32 0x892114 0", "write32 0x6C7D00 0", "write32 0x73E930 0xC0004000", "write32 0x73E938 0", "write32 0x8AFA90 0x430C0000"],
+      "update": ["reg eax 0x73E930", "call 0xA7DA0 2000 0x3FF0000"],
+      "observe": [
+        {"name":"positive-tilt","address":"0x73E930","type":"i16","count":1,"rule":"response","initial":16384,"target":0,"retention":0.75,"tolerance":1,"baseline_bytes":"300F"},
+        {"name":"negative-tilt","address":"0x73E932","type":"i16","count":1,"rule":"response","initial":-16384,"target":0,"retention":0.75,"tolerance":1,"baseline_bytes":"D0F0"}
+      ]
+    },
+    {
+      "name": "ball-size-expiration", "capture": "-", "ticks": 20,
+      "evidence": "8BC90..8BCA7 decrements the duration, clears effect flags below zero, and skips response on that original tick. Compare through that boundary, not just the steady shrinking state.",
+      "setup": ["write32 0x3FE0068 0x3F800000", "write32 0x3FE014C 0x3F800000", "write32 0x3FE0148 15", "write32 0x3FE009C 2", "write32 0x3FE0104 0"],
+      "update": ["reg ecx 0x3FE0000", "call 0x8BC40 1000 0x3FF0000"],
+      "observe": [{"name":"radius","address":"0x3FE0068","type":"f32","count":1,"rule":"response-stages","initial":1,"stages":[{"until":15,"target":0.5,"retention":0.7},{"until":16,"target":0.5,"retention":1},{"until":20,"target":1,"retention":0.8}],"tolerance":0.000002}]
+    },
+    {
+      "name": "world-replay-target", "capture": "build/checks/replay-timing/fixed-144-capture", "ticks": 5,
+      "snapshot_sha256": "56DE16BA2E976175647795116BAEC967319CFAD60E93227F64BFA2529B877CD1",
+      "evidence": "27A5F0 samples recorded WORLD angles; this verified snapshot at time 140 gives -4187,6. A7E70 approaches those signed angles by /4. Both start 16384 above target, making five original integer steps exact.",
+      "setup": ["write32 0x892114 0", "write32 0x73E930 0x40062FA5", "write32 0x73E938 0", "write32 0x8AFA90 0x430C0000"],
+      "update": ["reg esi 0x73E930", "call 0xA7E70 2000 0x3FF0000"],
+      "observe": [
+        {"name":"x-tilt","address":"0x73E930","type":"i16","count":1,"rule":"response","initial":12197,"target":-4187,"retention":0.75,"tolerance":1,"baseline_bytes":"D5FE"},
+        {"name":"z-tilt","address":"0x73E932","type":"i16","count":1,"rule":"response","initial":16390,"target":6,"retention":0.75,"tolerance":1,"baseline_bytes":"360F"}
+      ]
+    },
+    {
+      "name": "world-steering-neutral", "capture": "-", "ticks": 5,
+      "evidence": "A7F20 WORLD type 11: A7F9B approaches stick target by 0.2, then A7FB2 multiplies by 0.8. Combined retention is 0.64; two integer truncations bound the original accumulated error below 1.8/(1-0.64)=5 units.",
+      "setup": ["write32 0x892114 0", "write32 0x73E930 0x27100000", "write32 0x73E938 0", "write32 0x739B70 0", "write32 0x891EC8 0"],
+      "update": ["reg esi 0x73E930", "call 0xA7F20 2000 0x3FF0000"],
+      "observe": [{"name":"tilt","address":"0x73E932","type":"i16","count":1,"rule":"response","initial":10000,"target":0,"retention":0.64,"tolerance":5,"baseline_bytes":"3004"}]
+    },
+    {
+      "name": "world-steering-input", "capture": "-", "ticks": 5,
+      "evidence": "A7F51 divides signed stick by 60, clamps to +/-1, scales by -4096. The combined 0.2 response then 0.8 decay has equilibrium target*0.16/0.36, not target. Tolerance follows the two original integer conversions.",
+      "setup": ["write32 0x892114 0", "write32 0x73E930 0", "write32 0x73E938 0", "write32 0x739B70 0", "write32 0x891EC8 0x003C0000"],
+      "update": ["reg esi 0x73E930", "call 0xA7F20 2000 0x3FF0000"],
+      "observe": [{"name":"tilt","address":"0x73E932","type":"i16","count":1,"rule":"response","initial":0,"target":-1820.4444444444443,"retention":0.64,"tolerance":5,"baseline_bytes":"A9F9"}]
+    },
+    {
+      "name": "world-steering-paused", "capture": "-", "ticks": 5,
+      "evidence": "A7F28 checks original pause mask 0A before reading input or advancing either response.",
+      "setup": ["write32 0x892114 8", "write32 0x73E930 0xD8F00000", "write32 0x73E938 0", "write32 0x739B70 0", "write32 0x891EC8 0x00C40000"],
+      "update": ["reg esi 0x73E930", "call 0xA7F20 2000 0x3FF0000"],
+      "observe": [{"name":"tilt","address":"0x73E932","type":"i16","count":1,"rule":"constant","expected":[-10000],"tolerance":0}]
+    },
+    {
+      "name": "world-steering-clamped", "capture": "-", "ticks": 5,
+      "evidence": "A7F59 clamps the negative signed input to -1 before scaling; opposite initial tilt exercises both signed integer conversions.",
+      "setup": ["write32 0x892114 0", "write32 0x73E930 0xD8F00000", "write32 0x73E938 0", "write32 0x739B70 0", "write32 0x891EC8 0x00800000"],
+      "update": ["reg esi 0x73E930", "call 0xA7F20 2000 0x3FF0000"],
+      "observe": [{"name":"tilt","address":"0x73E932","type":"i16","count":1,"rule":"response","initial":-10000,"target":1820.4444444444443,"retention":0.64,"tolerance":5}]
+    },
+    {
+      "name": "world-steering-pause-resume", "capture": "-", "ticks": 5,
+      "evidence": "A7F28 returns during pause. Fractional response history must remain frozen with the stored angle, then resume without a catch-up step.",
+      "setup": ["write32 0x892114 0", "write32 0x73E930 0x27100000", "write32 0x73E938 0", "write32 0x739B70 0", "write32 0x891EC8 0"],
+      "actions": [{"tick":2,"commands":["write32 0x892114 8"]},{"tick":3,"commands":["write32 0x892114 0"]}],
+      "update": ["reg esi 0x73E930", "call 0xA7F20 2000 0x3FF0000"],
+      "observe": [{"name":"tilt","address":"0x73E932","type":"i16","count":1,"rule":"response-stages","initial":10000,"stages":[{"until":2,"target":0,"retention":0.64},{"until":3,"target":0,"retention":1},{"until":5,"target":0,"retention":0.64}],"tolerance":5}]
+    },
+    {
+      "name": "world-steering-reset", "capture": "-", "ticks": 5,
+      "evidence": "A8000 zeros precisely four 0x3C-byte WORLD records; response history must restart with this original initializer and externally replaced tilt values.",
+      "setup": ["write32 0x892114 0", "write32 0x73E930 0x27100000", "write32 0x73E938 0", "write32 0x739B70 0", "write32 0x891EC8 0"],
+      "actions": [{"tick":2,"commands":["call 0xA8000 2000 0x3FF0000","write32 0x73E930 0xD8F00000"]}],
+      "update": ["reg esi 0x73E930", "call 0xA7F20 2000 0x3FF0000"],
+      "observe": [{"name":"tilt","address":"0x73E932","type":"i16","count":1,"rule":"response-stages","initial":10000,"stages":[{"until":2,"target":0,"retention":0.64},{"until":5,"initial":-10000,"target":0,"retention":0.64}],"tolerance":5}]
+    },
+    {
+      "name": "world-existing-relaxation", "capture": "-", "ticks": 5,
+      "evidence": "A7880 selects A7D05 while WORLD+1C is positive. Original response subtracts 0.2*angle before signed integer conversion. The original quantization bound is less than 1/(1-0.8)=5 units; existing scaled gain alone exceeds this at high rates.",
+      "setup": ["write32 0x892114 0", "write32 0x6C9364 51", "write32 0x6C9354 0", "write32 0x73E930 0xD8F02710", "write32 0x73E938 0", "write32 0x73E94C 30", "write32 0x738E88 0"],
+      "update": ["reg esi 0x73E930", "call 0xA7880 2000 0x3FF0000"],
+      "observe": [
+        {"name":"positive-tilt","address":"0x73E930","type":"i16","count":1,"rule":"response","initial":10000,"target":0,"retention":0.8,"tolerance":5,"baseline_bytes":"CC0C"},
+        {"name":"negative-tilt","address":"0x73E932","type":"i16","count":1,"rule":"response","initial":-10000,"target":0,"retention":0.8,"tolerance":5,"baseline_bytes":"34F3"}
+      ]
+    },
+    {
+      "name": "world-individual-reset", "capture": "-", "ticks": 5,
+      "evidence": "A8060 calls A7820 to initialize one WORLD record using EDX. Its 15-dword clear must invalidate that record's fractional angles; the other three records remain independent.",
+      "setup": ["write32 0x892114 0", "write32 0x6C9364 51", "write32 0x6C9354 0", "write32 0x73E930 0xD8F02710", "write32 0x73E938 0", "write32 0x73E94C 30", "write32 0x738E88 0"],
+      "actions": [{"tick":2,"commands":["reg edx 0x73E930","call 0xA7820 2000 0x3FF0000","write32 0x73E930 0x2710D8F0","write32 0x73E94C 30"]}],
+      "update": ["reg esi 0x73E930", "call 0xA7880 2000 0x3FF0000"],
+      "observe": [
+        {"name":"x-tilt","address":"0x73E930","type":"i16","count":1,"rule":"response-stages","initial":10000,"stages":[{"until":2,"target":0,"retention":0.8},{"until":5,"initial":-10000,"target":0,"retention":0.8}],"tolerance":5},
+        {"name":"z-tilt","address":"0x73E932","type":"i16","count":1,"rule":"response-stages","initial":-10000,"stages":[{"until":2,"target":0,"retention":0.8},{"until":5,"initial":10000,"target":0,"retention":0.8}],"tolerance":5}
+      ]
+    },
+    {
+      "name": "dialog-opening", "capture": "-", "ticks": 5,
+      "evidence": "1C920 reports an active dialog from 6D047A. 1DD86 increments duration, 1DD9F tests visibility and 1DDA5 produces alpha. Break at 74F10 entry before drawing; no native API is replaced.",
+      "setup": ["write32 0x6EB358 0", "write32 0x6D0478 0", "write32 0x6D04D8 0x00FF0000", "write32 0x6CA6F0 0x00FF0000", "write32 0x6CD42C 0xFFFF0000", "write32 0x6D010C 0"],
+      "update": ["call-until 0x1DD10 0x74F10 2000 0x3FF0000"],
+      "observe": [
+        {"name":"duration","address":"0x6D010C","type":"i32","count":1,"rule":"counter","initial":0,"speed":1,"minimum":0,"maximum":8,"tolerance":0,"baseline_bytes":"05000000"},
+        {"name":"alpha","address":"0x482FE4","type":"f32","count":1,"rule":"clamped-linear","initial":0,"speed":0.1,"minimum":0,"maximum":0.8,"tolerance":0.000001,"baseline_bytes":"0000003F"}
+      ]
+    },
+    {
+      "name": "dialog-closing", "capture": "-", "ticks": 5,
+      "evidence": "1C920 returns zero when all three dialog-state bytes are FF; DI=FFFF selects the decrement at 1DD6D. Preserve its JNS flag consumer as well as alpha timing. Stop before drawing.",
+      "setup": ["write32 0x6EB358 0", "write32 0x6D0478 0x00FF0000", "write32 0x6D04D8 0x00FF0000", "write32 0x6CA6F0 0x00FF0000", "write32 0x6CD42C 0xFFFF0000", "write32 0x6D010C 8"],
+      "update": ["call-until 0x1DD10 0x74F10 2000 0x3FF0000"],
+      "observe": [
+        {"name":"duration","address":"0x6D010C","type":"i32","count":1,"rule":"counter","initial":8,"speed":-1,"minimum":0,"maximum":8,"tolerance":0,"baseline_bytes":"03000000"},
+        {"name":"alpha","address":"0x482FE4","type":"f32","count":1,"rule":"clamped-linear","initial":0.8,"speed":-0.1,"minimum":0,"maximum":0.8,"tolerance":0.000001,"baseline_bytes":"9A99993E"}
+      ]
+    },
+    {
+      "name": "dialog-clamped", "capture": "-", "ticks": 5,
+      "evidence": "1DD87..1DD96 clamps the duration at eight. Fractional alpha must reach 0.8 at one tick from initial seven and stay there; do not repeatedly add phase to the stored count.",
+      "setup": ["write32 0x6EB358 0", "write32 0x6D0478 0", "write32 0x6D04D8 0x00FF0000", "write32 0x6CA6F0 0x00FF0000", "write32 0x6CD42C 0xFFFF0000", "write32 0x6D010C 7"],
+      "update": ["call-until 0x1DD10 0x74F10 2000 0x3FF0000"],
+      "observe": [
+        {"name":"duration","address":"0x6D010C","type":"i32","count":1,"rule":"counter","initial":7,"speed":1,"minimum":0,"maximum":8,"tolerance":0,"baseline_bytes":"08000000"},
+        {"name":"alpha","address":"0x482FE4","type":"f32","count":1,"rule":"clamped-linear","initial":0.7,"speed":0.1,"minimum":0,"maximum":0.8,"tolerance":0.000001,"baseline_bytes":"CDCC4C3F"}
+      ]
+    },
+    {
+      "name": "goal-flight", "capture": "-", "ticks": 5,
+      "evidence": "A3530 dispatches A2F50 state 3; A3059 turns 0xE38 units about Y. No assets or host calls on this state. Original 60 Hz final quaternion preserved in refresh-reactions/audit-final-goal-1.json.",
+      "setup": ["write32 0x3FE0084 0x03030004", "write32 0x3FE0288 0", "write32 0x3FE028C 0", "write32 0x3FE0290 0", "write32 0x3FE0294 0x3F800000"],
+      "update": ["call 0xA3530 2000 0x3FF0000 0x3FE0000"],
+      "observe": [{"name":"quaternion","address":"0x3FE0288","type":"f32","count":4,"rule":"rotation-y","speed":3640,"tolerance":0.000002,"baseline_bytes":"000000008212443F000000006D98243F"}]
+    }
+  ]
+}

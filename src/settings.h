@@ -10,6 +10,7 @@
 struct SDL_Window;
 union SDL_Event;
 struct ID3D11ShaderResourceView;
+struct ImFont;
 namespace smbd {
 class Renderer;
 std::string check_presentation(const std::filesystem::path&,const std::filesystem::path& xbe={},const std::filesystem::path& disc={});
@@ -57,11 +58,15 @@ private:
     float display_refresh_=0;
     float animation_=0;
     bool playing_=false,binding_controller_=false;
+    ImFont* italic_font_=nullptr;
+    std::uint64_t mouse_activity_=0;
+    bool cursor_hidden_=false;
     int binding_action_=-1;
     int binding_release_=0;
     std::uint32_t binding_device_=0;
     void rebind(unsigned action,bool controller);
     void refresh_options();
+    void show_cursor();
     bool browse(std::array<char,2048>&,bool);
 };
 }

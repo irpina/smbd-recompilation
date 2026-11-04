@@ -12,6 +12,7 @@
 #include <uxtheme.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -31,6 +32,14 @@ constexpr wchar_t title[]=L"Super Monkey Ball Deluxe";
 constexpr wchar_t registry[]=L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\SMBDRecomp";
 constexpr std::string_view marker="SMBD-INSTALL-V1";
 constexpr COLORREF cream=RGB(255,242,201),gold=RGB(255,212,82),brown=RGB(48,27,10),yellow=RGB(255,204,31);
+constexpr RECT form_panel{24,116,856,432};
+constexpr int status_top=form_panel.bottom+8;
+constexpr RECT status_panel{24,status_top,856,status_top+188};
+constexpr int buttons_top=status_panel.bottom+10,client_width=880,client_height=buttons_top+54;
+constexpr int form_left=form_panel.left+24,form_right=form_panel.right-24;
+constexpr int status_left=status_panel.left+16,status_right=status_panel.right-16;
+constexpr int checkbox_inset_x=12,checkbox_inset_y=4;
+constexpr std::array checkbox_rows{RECT{form_left,330,form_right,364},RECT{form_left,374,form_right,408}};
 struct Entry {std::filesystem::path path;std::uint64_t size;std::string digest;};
 struct State {
     std::mutex mutex;std::wstring phase=L"Choose your game image and installation folder.",error;
@@ -385,15 +394,30 @@ std::wstring text(HWND control) {
 }
 void enable_control(HWND handle,bool enabled) {if((IsWindowEnabled(handle)!=FALSE)!=enabled) EnableWindow(handle,enabled);}
 void caption_control(HWND handle,const wchar_t* caption) {if(text(handle)!=caption) SetWindowTextW(handle,caption);}
+bool paths_ready() {
+    return uninstalling || (text(source_edit).find_first_not_of(L" \t\r\n")!=std::wstring::npos &&
+        text(destination_edit).find_first_not_of(L" \t\r\n")!=std::wstring::npos);
+}
+void update_install_button() {
+    if(!install_button) return;
+    bool running,complete;
+    {std::lock_guard lock(state.mutex);running=state.running;complete=state.complete;}
+    enable_control(install_button,!running && (complete?!uninstalling:paths_ready()));
+}
 void invalidate_status(HWND handle) {
     ++status_invalidations;
-    const RECT bounds{scale(24),scale(388),scale(856),scale(576)};
+    const RECT bounds{scale(status_panel.left),scale(status_panel.top),scale(status_panel.right),scale(status_panel.bottom)};
     InvalidateRect(handle,&bounds,FALSE);
 }
 HWND control(const wchar_t* type,const wchar_t* caption,DWORD style,int id,RECT rectangle) {
     const auto child=CreateWindowExW(0,type,caption,WS_CHILD|WS_VISIBLE|style,0,0,0,0,window,reinterpret_cast<HMENU>(INT_PTR(id)),GetModuleHandleW(nullptr),nullptr);
     checked(child!=nullptr,"Cannot create installer controls");SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(font),TRUE);
     controls.emplace_back(child,rectangle);return child;
+}
+HWND checkbox(const wchar_t* caption,int id,RECT row) {
+    InflateRect(&row,-checkbox_inset_x,-checkbox_inset_y);
+    const auto child=control(L"BUTTON",caption,BS_AUTOCHECKBOX|WS_TABSTOP,id,row);
+    SetWindowTheme(child,L"",L"");return child;
 }
 void position_controls() {
     for(const auto& [child,r]:controls) MoveWindow(child,scale(r.left),scale(r.top),scale(r.right-r.left),scale(r.bottom-r.top),TRUE);
@@ -415,7 +439,7 @@ void start() {
     const auto iso=text(source_edit);
     const auto destination=uninstalling?uninstall_root:std::filesystem::path(text(destination_edit));
     const bool copy=SendMessageW(copy_check,BM_GETCHECK,0,0)==BST_CHECKED,desktop=SendMessageW(desktop_check,BM_GETCHECK,0,0)==BST_CHECKED;
-    if(!uninstalling && (iso.empty() || destination.empty())) throw std::runtime_error("Choose your game image and installation folder first.");
+    if(!paths_ready()) throw std::runtime_error("Choose your game image and installation folder first.");
     {std::lock_guard lock(state.mutex);state.running=true;state.complete=false;state.error.clear();state.stage=0;state.percent=0;++state.revision;}
     state.cancel=false;started=GetTickCount64();
     for(const auto input:inputs) EnableWindow(input,FALSE);EnableWindow(install_button,FALSE);SetWindowTextW(close_button,L"Cancel");
@@ -438,31 +462,35 @@ void draw_text(HDC dc,std::wstring value,RECT rectangle,COLORREF color,HFONT sel
 void paint(HDC dc) {
     SetStretchBltMode(dc,HALFTONE);SetBrushOrgEx(dc,0,0,nullptr);
     BITMAPINFO bitmap{};bitmap.bmiHeader={sizeof(BITMAPINFOHEADER),512,-256,1,32,BI_RGB,0,0,0,0,0};
-    StretchDIBits(dc,0,0,scale(880),scale(640),0,0,512,256,wood.data(),&bitmap,DIB_RGB_COLORS,SRCCOPY);
+    StretchDIBits(dc,0,0,scale(client_width),scale(client_height),0,0,512,256,wood.data(),&bitmap,DIB_RGB_COLORS,SRCCOPY);
     auto pen=CreatePen(PS_SOLID,scale(2),RGB(183,129,51));const auto old_pen=SelectObject(dc,pen);const auto old_brush=SelectObject(dc,GetStockObject(NULL_BRUSH));
-    for(const auto r:{RECT{24,116,856,380},RECT{24,388,856,576}}) {
+    for(const auto r:{form_panel,status_panel}) {
         const auto saved=SaveDC(dc);const auto clip=CreateRoundRectRgn(scale(r.left),scale(r.top),scale(r.right),scale(r.bottom),scale(14),scale(14));
         ExtSelectClipRgn(dc,clip,RGN_AND);StretchDIBits(dc,scale(r.left),scale(r.top),scale(r.right-r.left),scale(r.bottom-r.top),0,0,512,256,wood_inset.data(),&bitmap,DIB_RGB_COLORS,SRCCOPY);
         RestoreDC(dc,saved);DeleteObject(clip);RoundRect(dc,scale(r.left),scale(r.top),scale(r.right),scale(r.bottom),scale(14),scale(14));
     }
     SelectObject(dc,old_brush);SelectObject(dc,old_pen);DeleteObject(pen);
+    if(!uninstalling) for(const auto row:checkbox_rows) {
+        const RECT background{scale(row.left),scale(row.top),scale(row.right),scale(row.bottom)};
+        FillRect(dc,&background,edit_brush);
+    }
     DrawIconEx(dc,scale(28),scale(28),logo_icon,scale(56),scale(56),0,nullptr,DI_NORMAL);
-    draw_text(dc,title,{100,28,850,65},gold,heading);
+    draw_text(dc,uninstalling?L"Uninstallation":L"Installation",{100,28,850,65},gold,heading);
     draw_text(dc,L"v"+smbd::wide(SMBD_VERSION)+L" · Windows x64",{640,34,840,60},gold,font_small,DT_RIGHT|DT_SINGLELINE);
-    draw_text(dc,uninstalling?L"Uninstall — your saved games and preferences will be kept.":L"Set up your copy of Super Monkey Ball Deluxe and get ready to play.",{100,70,850,106},cream,font_small);
+    draw_text(dc,uninstalling?L"Uninstall — your saved games and preferences will be kept.":L"Select your copy of Super Monkey Ball Deluxe and get ready to play!",{100,70,850,106},cream,font_small);
     if(!uninstalling) {
-        draw_text(dc,L"YOUR GAME IMAGE",{40,132,830,154},gold,font_small);
-        draw_text(dc,L"Use a US Xbox XISO image. Game files are verified before installation.",{40,199,830,224},cream,font_small);
-        draw_text(dc,L"INSTALLATION FOLDER",{40,234,830,256},gold,font_small);
+        draw_text(dc,L"YOUR GAME IMAGE",{form_left,140,form_right,162},gold,font_small);
+        draw_text(dc,L"Use a US Xbox XISO image. Game files are verified before installation.",{form_left,218,form_right,242},cream,font_small);
+        draw_text(dc,L"INSTALLATION FOLDER",{form_left,254,form_right,276},gold,font_small);
     } else draw_text(dc,L"Remove the installed program and its copied game files. Your original ISO, saved games, and preferences are kept.",{40,140,824,215},cream,font);
     std::wstring phase,error;unsigned percent,stage;bool running,complete;
     {std::lock_guard lock(state.mutex);phase=state.phase;error=state.error;percent=state.percent;stage=state.stage;running=state.running;complete=state.complete;}
     const auto caption=running?std::format(L"STEP {} OF {}  ·  {}%",stage,uninstalling?1:4,percent):complete?L"COMPLETE":L"INSTALLATION PROGRESS";
-    draw_text(dc,caption,{40,400,840,424},gold,font_small);
-    draw_text(dc,phase,{40,431,840,465},cream,font);
-    if(!error.empty()) draw_text(dc,error,{40,500,840,566},RGB(255,200,134),font_small);
-    else if(running) draw_text(dc,std::format(L"Elapsed: {}:{:02}  ·  You can leave this window open while setup works.",(GetTickCount64()-started)/60000,((GetTickCount64()-started)/1000)%60),{32,500,848,540},cream,font_small);
-    else draw_text(dc,uninstalling?L"Only files recorded by this installer are removed.":L"Your original game image and saved games are kept.",{40,500,840,540},cream,font_small);
+    draw_text(dc,caption,{status_left,status_top+12,status_right,status_top+36},gold,font_small);
+    draw_text(dc,phase,{status_left,status_top+43,status_right,status_top+77},cream,font);
+    if(!error.empty()) draw_text(dc,error,{status_left,status_top+112,status_right,status_top+178},RGB(255,200,134),font_small);
+    else if(running) draw_text(dc,std::format(L"Elapsed: {}:{:02}  ·  You can leave this window open while setup works.",(GetTickCount64()-started)/60000,((GetTickCount64()-started)/1000)%60),{status_left,status_top+112,status_right,status_top+152},cream,font_small);
+    else draw_text(dc,uninstalling?L"Only files recorded by this installer are removed.":L"Your original game image and saved games are kept.",{status_left,status_top+112,status_right,status_top+152},cream,font_small);
 }
 LRESULT CALLBACK procedure(HWND handle,UINT message,WPARAM wparam,LPARAM lparam) {
     try {
@@ -488,6 +516,7 @@ LRESULT CALLBACK procedure(HWND handle,UINT message,WPARAM wparam,LPARAM lparam)
         if(message==WM_COMMAND) {
             switch(LOWORD(wparam)) {
             case 101:choose(false);break;case 102:choose(true);break;
+            case 110:case 111:if(HIWORD(wparam)==EN_CHANGE) update_install_button();break;
             case 103: {
                 bool complete;{std::lock_guard lock(state.mutex);complete=state.complete;}
                 if(complete && !uninstalling) checked(reinterpret_cast<INT_PTR>(ShellExecuteW(window,L"open",(std::filesystem::path(text(destination_edit))/"smbd.exe").c_str(),nullptr,nullptr,SW_SHOWNORMAL))>32,"Cannot launch the game");
@@ -508,7 +537,7 @@ LRESULT CALLBACK procedure(HWND handle,UINT message,WPARAM wparam,LPARAM lparam)
             if(!running) {
                 enable_control(close_button,true);
                 for(const auto input:inputs) enable_control(input,!complete);
-                enable_control(install_button,!uninstalling || !complete);caption_control(install_button,complete&&!uninstalling?L"Play game":uninstalling?L"Uninstall":L"Install");
+                update_install_button();caption_control(install_button,complete&&!uninstalling?L"Play game":uninstalling?L"Uninstall":L"Install");
                 caption_control(close_button,L"Close");
             } else enable_control(close_button,stage<4 && !state.cancel.load());
             invalidate_status(handle);return 0;
@@ -537,7 +566,7 @@ void capture_preview(const std::filesystem::path& path) {
         idle_repaint=GetUpdateRect(window,nullptr,FALSE)!=FALSE;
         if(idle_invalidations) throw std::runtime_error("Idle installer requested an unnecessary repaint");
     }
-    const int width=scale(880),height=scale(640);const auto dc=GetDC(window),memory=CreateCompatibleDC(dc);const auto bitmap=CreateCompatibleBitmap(dc,width,height);const auto old=SelectObject(memory,bitmap);
+    const int width=scale(client_width),height=scale(client_height);const auto dc=GetDC(window),memory=CreateCompatibleDC(dc);const auto bitmap=CreateCompatibleBitmap(dc,width,height);const auto old=SelectObject(memory,bitmap);
     paint(memory);
     for(const auto& [child,r]:controls) if(IsWindowVisible(child) || !uninstalling) {
         const auto saved=SaveDC(memory);SetViewportOrgEx(memory,scale(r.left),scale(r.top),nullptr);
@@ -555,9 +584,9 @@ void capture_preview(const std::filesystem::path& path) {
     ICONINFO icon{};checked(GetIconInfo(logo_icon,&icon)!=FALSE,"Cannot inspect the installer icon");
     BITMAP image{};checked(GetObjectW(icon.hbmColor,sizeof(image),&image)!=0,"Cannot inspect icon dimensions");
     DeleteObject(icon.hbmColor);DeleteObject(icon.hbmMask);
-    smbd::write_text(path.native()+L".json",std::format("{{\"format\":\"smbd-installer-preview-v1\",\"render_dpi\":{},\"size\":[{},{}],\"icon_size\":[{},{}],\"composited\":{},\"clips_children\":{},\"idle_timer_invalidations\":{},\"pending_window_paint\":{}}}\n",
+    smbd::write_text(path.native()+L".json",std::format("{{\"format\":\"smbd-installer-preview-v1\",\"render_dpi\":{},\"size\":[{},{}],\"icon_size\":[{},{}],\"composited\":{},\"clips_children\":{},\"idle_timer_invalidations\":{},\"pending_window_paint\":{},\"install_enabled\":{}}}\n",
         dpi,width,height,image.bmWidth,image.bmHeight,(GetWindowLongPtrW(window,GWL_EXSTYLE)&WS_EX_COMPOSITED)!=0,
-        (GetWindowLongPtrW(window,GWL_STYLE)&WS_CLIPCHILDREN)!=0,idle_invalidations,idle_repaint),true);
+        (GetWindowLongPtrW(window,GWL_STYLE)&WS_CLIPCHILDREN)!=0,idle_invalidations,idle_repaint,IsWindowEnabled(install_button)!=FALSE),true);
 }
 int wizard(const std::filesystem::path& preview={}) {
     checked_hr(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED),"Cannot initialize Setup");
@@ -570,22 +599,22 @@ int wizard(const std::filesystem::path& preview={}) {
     }
     WNDCLASSW cls{};cls.lpfnWndProc=procedure;cls.hInstance=GetModuleHandleW(nullptr);cls.hCursor=LoadCursorW(nullptr,IDC_ARROW);cls.hIcon=LoadIconW(cls.hInstance,MAKEINTRESOURCEW(1));cls.lpszClassName=L"SMBDInstaller";
     checked(RegisterClassW(&cls)!=0,"Cannot register the installer window");
-    RECT bounds{0,0,scale(880),scale(640)};AdjustWindowRectExForDpi(&bounds,WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,FALSE,0,dpi);
+    RECT bounds{0,0,scale(client_width),scale(client_height)};AdjustWindowRectExForDpi(&bounds,WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,FALSE,0,dpi);
     window=CreateWindowExW(WS_EX_CONTROLPARENT|WS_EX_COMPOSITED,cls.lpszClassName,uninstalling?L"Super Monkey Ball Deluxe — Uninstall":L"Super Monkey Ball Deluxe — Setup",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,bounds.right-bounds.left,bounds.bottom-bounds.top,nullptr,nullptr,cls.hInstance,nullptr);
     checked(window!=nullptr,"Cannot open the installer");
     const auto initial=uninstalling?Defaults{uninstall_root,{},true,false}:defaults();
-    source_edit=control(L"EDIT",initial.iso.c_str(),ES_AUTOHSCROLL|WS_BORDER|WS_TABSTOP,110,{40,161,724,195});
-    const auto browse_iso=control(L"BUTTON",L"Browse…",BS_OWNERDRAW|WS_TABSTOP,101,{736,161,840,195});
+    source_edit=control(L"EDIT",initial.iso.c_str(),ES_AUTOHSCROLL|WS_BORDER|WS_TABSTOP,110,{form_left,172,form_right-116,206});
+    const auto browse_iso=control(L"BUTTON",L"Browse…",BS_OWNERDRAW|WS_TABSTOP,101,{form_right-104,172,form_right,206});
     const auto& folder=initial.folder;
-    destination_edit=control(L"EDIT",folder.c_str(),ES_AUTOHSCROLL|WS_BORDER|WS_TABSTOP,111,{40,263,724,297});
-    const auto browse_folder=control(L"BUTTON",L"Browse…",BS_OWNERDRAW|WS_TABSTOP,102,{736,263,840,297});
-    copy_check=control(L"BUTTON",L"Keep a copy of my ISO with the game (uses additional disk space)",BS_AUTOCHECKBOX|WS_TABSTOP,112,{40,307,830,333});SendMessageW(copy_check,BM_SETCHECK,initial.copy?BST_CHECKED:BST_UNCHECKED,0);SetWindowTheme(copy_check,L"",L"");
-    desktop_check=control(L"BUTTON",L"Create a desktop shortcut",BS_AUTOCHECKBOX|WS_TABSTOP,113,{40,341,830,367});SetWindowTheme(desktop_check,L"",L"");SendMessageW(desktop_check,BM_SETCHECK,initial.desktop?BST_CHECKED:BST_UNCHECKED,0);
-    progress_bar=control(PROGRESS_CLASSW,L"",PBS_SMOOTH,114,{40,472,840,492});SetWindowTheme(progress_bar,L"",L"");
+    destination_edit=control(L"EDIT",folder.c_str(),ES_AUTOHSCROLL|WS_BORDER|WS_TABSTOP,111,{form_left,286,form_right-116,320});
+    const auto browse_folder=control(L"BUTTON",L"Browse…",BS_OWNERDRAW|WS_TABSTOP,102,{form_right-104,286,form_right,320});
+    copy_check=checkbox(L"Keep a copy of my ISO with the game (uses additional disk space)",112,checkbox_rows[0]);SendMessageW(copy_check,BM_SETCHECK,initial.copy?BST_CHECKED:BST_UNCHECKED,0);
+    desktop_check=checkbox(L"Create a desktop shortcut",113,checkbox_rows[1]);SendMessageW(desktop_check,BM_SETCHECK,initial.desktop?BST_CHECKED:BST_UNCHECKED,0);
+    progress_bar=control(PROGRESS_CLASSW,L"",PBS_SMOOTH,114,{status_left,status_top+84,status_right,status_top+104});SetWindowTheme(progress_bar,L"",L"");
     SendMessageW(progress_bar,PBM_SETRANGE32,0,100);SendMessageW(progress_bar,PBM_SETBARCOLOR,0,yellow);SendMessageW(progress_bar,PBM_SETBKCOLOR,0,brown);
-    install_button=control(L"BUTTON",uninstalling?L"Uninstall":L"Install",BS_OWNERDRAW|WS_TABSTOP,103,{620,586,748,624});
-    close_button=control(L"BUTTON",L"Close",BS_OWNERDRAW|WS_TABSTOP,104,{760,586,848,624});
-    inputs={source_edit,browse_iso,destination_edit,browse_folder,copy_check,desktop_check};position_controls();
+    install_button=control(L"BUTTON",uninstalling?L"Uninstall":L"Install",BS_OWNERDRAW|WS_TABSTOP|WS_DISABLED,103,{620,buttons_top,748,buttons_top+38});
+    close_button=control(L"BUTTON",L"Close",BS_OWNERDRAW|WS_TABSTOP,104,{760,buttons_top,848,buttons_top+38});
+    inputs={source_edit,browse_iso,destination_edit,browse_folder,copy_check,desktop_check};position_controls();update_install_button();
     if(uninstalling) for(const auto input:inputs) ShowWindow(input,SW_HIDE);
     SetTimer(window,1,100,nullptr);
     if(!preview.empty()) {SendMessageW(progress_bar,PBM_SETPOS,state.percent,0);capture_preview(preview);DestroyWindow(window);return 0;}

@@ -5,6 +5,8 @@ explicitly rejected that implementation on 2026-10-28. Its acceptance results
 do not establish true high-refresh rendering or high-refresh motion. See
 true_refresh.txt for the subsequent native scene-step implementation and its
 separate motion and gameplay validation. Results below are historical only.
+The current FMV pacing follow-up in host_settings.txt (2026-11-03) also
+supersedes the historical E5990 movie-wait exception described below.
 
 Verified executable SHA256:
 9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2

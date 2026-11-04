@@ -220,7 +220,15 @@ SettingsUi::SettingsUi(SDL_Window* window,Renderer& renderer,Settings& settings,
     IMGUI_CHECKVERSION();ImGui::CreateContext();auto& io=ImGui::GetIO();
     io.ConfigFlags|=ImGuiConfigFlags_NavEnableKeyboard|ImGuiConfigFlags_NavEnableGamepad;
     io.IniFilename=nullptr;io.LogFilename=nullptr;
-    if(std::filesystem::exists("C:/Windows/Fonts/segoeui.ttf")) io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf",18);
+    std::array<wchar_t,MAX_PATH> windows{};
+    const auto length=GetWindowsDirectoryW(windows.data(),static_cast<UINT>(windows.size()));
+    if(length && length<windows.size()) {
+        const auto fonts=std::filesystem::path(windows.data())/"Fonts";
+        const auto regular=fonts/"segoeui.ttf",italic=fonts/"segoeuii.ttf";
+        if(std::filesystem::exists(regular)) io.Fonts->AddFontFromFileTTF(path_text(regular).c_str(),18);
+        else io.Fonts->AddFontDefault();
+        if(std::filesystem::exists(italic)) italic_font_=io.Fonts->AddFontFromFileTTF(path_text(italic).c_str(),18);
+    }
     auto& style=ImGui::GetStyle();style.FontSizeBase=18;style.WindowPadding={24,20};style.FramePadding={12,8};style.ItemSpacing={12,10};
     style.WindowRounding=12;style.ChildRounding=9;style.FrameRounding=5;style.GrabRounding=5;style.WindowBorderSize=0;
     ImGui::StyleColorsDark();auto* c=style.Colors;
@@ -246,7 +254,14 @@ SettingsUi::SettingsUi(SDL_Window* window,Renderer& renderer,Settings& settings,
         if(surface) {SDL_SetWindowIcon(window,surface);SDL_DestroySurface(surface);}
     } catch(const std::exception& error) {message(error.what());}
 }
-SettingsUi::~SettingsUi() {ImGui_ImplDX11_Shutdown();ImGui_ImplSDL3_Shutdown();ImGui::DestroyContext();}
+SettingsUi::~SettingsUi() {show_cursor();ImGui_ImplDX11_Shutdown();ImGui_ImplSDL3_Shutdown();ImGui::DestroyContext();}
+void SettingsUi::show_cursor() {
+    mouse_activity_=SDL_GetTicks();
+    if(cursor_hidden_) {
+        ImGui::GetIO().ConfigFlags&=~ImGuiConfigFlags_NoMouseCursorChange;
+        SDL_ShowCursor();cursor_hidden_=false;
+    }
+}
 void SettingsUi::refresh_options() {
     refresh_rates_={0,30,60,75,90,120,144,165,180,240,360};
     const auto display=SDL_GetDisplayForWindow(window_);
@@ -269,6 +284,11 @@ void SettingsUi::rebind(unsigned action,bool controller) {
     binding_action_=int(action);binding_controller_=controller;category=5;
 }
 bool SettingsUi::event(const SDL_Event& event) {
+    switch(event.type) {
+    case SDL_EVENT_MOUSE_MOTION:case SDL_EVENT_MOUSE_BUTTON_DOWN:case SDL_EVENT_MOUSE_BUTTON_UP:case SDL_EVENT_MOUSE_WHEEL:
+    case SDL_EVENT_WINDOW_MOUSE_ENTER:case SDL_EVENT_WINDOW_MOUSE_LEAVE:case SDL_EVENT_WINDOW_FOCUS_GAINED:case SDL_EVENT_WINDOW_FOCUS_LOST:
+    case SDL_EVENT_WINDOW_HIDDEN:case SDL_EVENT_WINDOW_MINIMIZED:show_cursor();break;
+    }
     if(event.type==SDL_EVENT_GAMEPAD_REMOVED && event.gdevice.which==binding_device_) binding_release_=0;
     if(binding_release_ && ((event.type==SDL_EVENT_GAMEPAD_BUTTON_UP && event.gbutton.which==binding_device_ && int(event.gbutton.button)+1==binding_release_) ||
         (event.type==SDL_EVENT_GAMEPAD_AXIS_MOTION && event.gaxis.which==binding_device_ && binding_release_<0 && int(event.gaxis.axis)==(-binding_release_-1)/2 && std::abs(int(event.gaxis.value))<8000))) {
@@ -329,9 +349,15 @@ bool SettingsUi::browse(std::array<char,2048>& value,bool disc) {
     } catch(const std::exception& error) {file_message(error.what());return false;}
 }
 void SettingsUi::draw(bool playing,bool recording,double fps,const std::function<void()>& capture,const std::function<void()>& performance) {
+    auto& io=ImGui::GetIO();
+    constexpr auto focus=SDL_WINDOW_INPUT_FOCUS|SDL_WINDOW_MOUSE_FOCUS;
+    if(!playing || !playing_ || active() || (SDL_GetWindowFlags(window_)&focus)!=focus) show_cursor();
+    else if(!cursor_hidden_ && SDL_GetTicks()-mouse_activity_>=2000 && SDL_HideCursor()) {
+        // The SDL backend otherwise shows the cursor every frame, even with settings closed.
+        io.ConfigFlags|=ImGuiConfigFlags_NoMouseCursorChange;cursor_hidden_=true;
+    }
     // SDL polls controller navigation every frame. Keep a captured confirm
     // button from activating the binding again until it has been released.
-    auto& io=ImGui::GetIO();
     if(binding_action_>=0 || binding_release_) io.ConfigFlags&=~ImGuiConfigFlags_NavEnableGamepad;
     else io.ConfigFlags|=ImGuiConfigFlags_NavEnableGamepad;
     ImGui_ImplDX11_NewFrame();ImGui_ImplSDL3_NewFrame();ImGui::NewFrame();
@@ -350,14 +376,17 @@ void SettingsUi::draw(bool playing,bool recording,double fps,const std::function
         ImGui::Begin("Super Monkey Ball Deluxe settings",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings);
         wooden_panel(wood_.Get(),false);ImGui::PushStyleVar(ImGuiStyleVar_DisabledAlpha,1.0f);
         ImGui::BeginDisabled(!show || animation_<1);ImGui::PopStyleVar();
+        constexpr float icon_height=48;
+        const float header_bottom=ImGui::GetCursorPosY()+(icon_?icon_height:ImGui::GetTextLineHeight());
         if(icon_) {
-            constexpr float icon_height=48;
             ImGui::Image(reinterpret_cast<ImTextureID>(icon_.Get()),{icon_height*icon_aspect_,icon_height});ImGui::SameLine();
-            ImGui::SetCursorPosY(ImGui::GetCursorPosY()+(icon_height-ImGui::GetTextLineHeight())/2);
         }
         constexpr const char* save_hint="Changes save automatically";
+        ImGui::PushFont(italic_font_,0);
+        ImGui::SetCursorPosY(header_bottom-ImGui::GetTextLineHeight());
         ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(save_hint).x));
         ImGui::TextDisabled("%s",save_hint);
+        ImGui::PopFont();
         ImGui::Separator();
         constexpr const char* pages[]={"Game Files","General","Audio","Graphics","Enhancements","Controls","Diagnostics"};
         const auto content=ImGui::GetContentRegionAvail();

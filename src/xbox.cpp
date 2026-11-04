@@ -26,6 +26,7 @@
 #include <sstream>
 
 namespace smbd {
+void reset_frame_history();
 namespace {
 constexpr std::uint32_t success=0,invalid_handle=0xC0000008,invalid_parameter=0xC000000D,
     no_memory=0xC0000017,conflicting_addresses=0xC0000018,timeout=0x102,
@@ -260,14 +261,21 @@ struct Xbox::State {
     std::chrono::steady_clock::time_point video_started;
     std::uint64_t video_ticks=0,vblank_callbacks=0;
     FrameClock source_clock;
+    bool movie_pacing=false;
     FrameClock::Time frame_started{};
     double frame_debt=0,logic_fraction=0,stage_time=0;
     std::uint32_t stage_expected=UINT32_MAX;
     std::uint32_t stage_groups=0;
     std::vector<FrameCounter> stage_group_clocks;
     bool in_frame_loop=false;
-    bool menu_layout_active=false;
-    std::array<std::uint32_t,5> menu_layout_inputs{};
+    struct Presentation {
+        const FramePresentation* layout=nullptr;
+        std::uint32_t flags=0;
+        std::array<std::uint32_t,8> registers{};
+        std::array<std::byte,0x308> frame{};
+    };
+    std::array<Presentation,16> presentations{};
+    unsigned presentation_count=0,presentation_replay=0;
     struct GoalCrossing { bool pending=false;std::uint32_t goal=0,group=0;std::uint8_t type=0; };
     std::array<std::array<GoalCrossing,2>,8> goal_crossings{};
     bool sampling_goals=false;
@@ -277,7 +285,7 @@ struct Xbox::State {
 
     State(Xbe& image,Memory& memory,std::span<std::byte> ram,const std::filesystem::path& disc_path,XboxHost host):image(image),memory(memory),ram(ram),host(std::move(host)) {
         if(ram.size()!=64*1024*1024 || !image.supported()) throw std::runtime_error("Native Xbox requires the verified image and 64 MiB RAM");
-        frame_step={};
+        frame_step={};reset_frame_history();
         if(!disc_path.empty()) {
             disc=std::make_unique<Disc>(disc_path);
             const auto executable=disc->find("default.xbe");
@@ -296,21 +304,6 @@ struct Xbox::State {
         memory.map(kernel_base,kernel_image);
         memory.map(0x80000000U+heap_begin,ram.subspan(heap_begin));
         memory.map(0xF0000000U+heap_begin,ram.subspan(heap_begin));
-        {
-            // The storage/dialog backdrop at 0x482FB8 is an 8x8 solid sprite
-            // centred on (320,240). Its fixed 80x60 scale covers only 4:3;
-            // Align the D3D8 pixel origin and round the full-screen bounds
-            // outward on the NV2A 1/16-pixel grid. Its 1/32 raster bias must
-            // not leave edge samples uncovered with high-resolution MSAA.
-            constexpr std::array<std::uint32_t,6> backdrop{0x60,0x43A00000,0x43700000,0x3F800000,0x42A00000,0x42700000};
-            for(unsigned i=0;i<backdrop.size();++i) if(memory.load<std::uint32_t>(0x482FB8+i*4)!=backdrop[i])
-                throw std::runtime_error("Original dialog backdrop does not match the supported game");
-            const float width=this->host.ultrawide?480.0f*21/9:this->host.widescreen?480.0f*16/9:640.0f;
-            memory.store<std::uint32_t>(0x482FBC,std::bit_cast<std::uint32_t>(319.5f));
-            memory.store<std::uint32_t>(0x482FC0,std::bit_cast<std::uint32_t>(239.5f));
-            memory.store<std::uint32_t>(0x482FC8,std::bit_cast<std::uint32_t>((width+1.0f/16)/8));
-            memory.store<std::uint32_t>(0x482FCC,std::bit_cast<std::uint32_t>((480.0f+1.0f/16)/8));
-        }
         {
             // Shared original camera aspect and horizontal canvas width. Their
             // only indexed readers configure cameras/culling and the UI canvas.
@@ -1003,7 +996,11 @@ struct Xbox::State {
         const auto ms=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-started).count();
         memory.store<std::uint32_t>(tick_address,static_cast<std::uint32_t>(ms));
     }
+    bool movie_sync() const {
+        return memory.load<std::uint32_t>(0x756080) && memory.load<std::uint8_t>(0x756088);
+    }
     unsigned render_rate() const {
+        if(movie_sync()) return 60;
         const auto rate=host.refresh_rate?host.refresh_rate():60U;
         return rate?std::max(60U,rate):0;
     }
@@ -1013,7 +1010,7 @@ struct Xbox::State {
         const auto scene=memory.load<std::uint16_t>(0x6C9288);
         const bool reset=!in_frame_loop || mode!=timing_mode || scene!=timing_scene;
         in_frame_loop=true;frame_thread=current;
-        if(reset) {frame_debt=logic_fraction=0;source_clock={};++timing_epochs;stage_expected=UINT32_MAX;stage_groups=0;goal_crossings={};}
+        if(reset) {frame_debt=logic_fraction=0;source_clock={};++timing_epochs;stage_expected=UINT32_MAX;stage_groups=0;goal_crossings={};reset_frame_history();}
         const auto rate=render_rate();
         double delta=1;
         if(!reset && rate!=60) {
@@ -1021,34 +1018,49 @@ struct Xbox::State {
             delta=std::min(1.0,frame_debt);frame_debt-=delta;
         }
         frame_started=now;timing_mode=mode;timing_scene=scene;
+        const auto previous_phase=static_cast<float>(logic_fraction);
         logic_fraction+=delta;
         const bool tick=logic_fraction>=1-1e-9;
         if(tick) logic_fraction=std::max(0.0,logic_fraction-1);
-        if(tick) menu_layout_active=false;
-        frame_step={static_cast<float>(delta),static_cast<float>(logic_fraction),tick};
+        if(tick) presentation_count=0;
+        advance_frame_step(static_cast<float>(delta),static_cast<float>(logic_fraction),tick);
+        // Utility swaps can reset the temporary FrameStep without resetting
+        // the scene clock. Its retained phase is the authoritative boundary.
+        frame_step.previous_phase=previous_phase;
     }
-    void draw_menu_layout(Cpu& cpu,bool record) {
-        // These five controller results are live at the presentation boundary;
-        // the remaining locals and all vertices are rebuilt by the game.
-        constexpr std::array offsets{0x18U,0x24U,0x2CU,0x34U,0x4CU};
-        if(record) {
-            for(unsigned i=0;i<offsets.size();++i) menu_layout_inputs[i]=memory.load<std::uint32_t>(cpu.registers[esp]+offsets[i]);
-            menu_layout_active=true;return;
+    void draw_menu_layout(Cpu& cpu,std::uint32_t entry,bool record) {
+        if(entry) {
+            const auto layout=std::ranges::find(frame_presentations,entry,&FramePresentation::entry);
+            if(layout==frame_presentations.end()) throw NativeBoundary(entry,"unknown frame presentation");
+            if(record) {
+                if(presentation_count==presentations.size()) throw NativeBoundary(entry,"frame presentation capacity exhausted");
+                auto& saved=presentations[presentation_count++];saved.layout=&*layout;
+                saved.registers=cpu.registers;saved.flags=cpu.flags;
+                const auto size=layout->frame_bytes?layout->frame_bytes:layout->argument_bytes;
+                std::memcpy(saved.frame.data(),memory.access(cpu.registers[esp]+(layout->frame_bytes?0:4),size),size);
+            } else {
+                const auto& saved=presentations[presentation_replay];
+                if(saved.layout!=&*layout) throw NativeBoundary(entry,"drawing continuation has another controller state");
+                const auto stack=cpu.registers[esp];cpu.registers=saved.registers;cpu.registers[esp]=stack;cpu.flags=saved.flags;
+                std::memcpy(memory.access(stack,layout->frame_bytes),saved.frame.data(),layout->frame_bytes);
+            }
+            return;
         }
-        if(!menu_layout_active) return;
-        // 2A13B0 combines menu input with the marker drawing at 2A22D2.
-        // Intermediate calls enter its verified presentation section directly.
+        // Preserve call order, including a controller's custom panel followed
+        // by the common menu labels. Multiple players may submit HUDs as well.
         const auto saved=cpu.registers;const auto flags=cpu.flags,pc=cpu.eip;
-        if(saved[esp]<current->stack+0x4B4) throw NativeBoundary(0x2A13B0,"menu drawing exhausted its guest stack");
+        if(presentation_count && saved[esp]<current->stack+0x708) throw NativeBoundary(cpu.eip,"frame presentation exhausted its guest stack");
         const auto stack=saved[esp]-0x400;
-        memory.store<std::uint32_t>(stack,return_sentinel);
-        // Original 2A13B7 reserves A4 bytes and saves four registers.
-        for(unsigned i=0;i<offsets.size();++i) memory.store<std::uint32_t>(stack-0xB4+offsets[i],menu_layout_inputs[i]);
-        cpu.registers[esp]=stack;
-        cpu.eip=0; // Native entry, not an observed original indirect call site.
-        invoke_native(cpu,memory,native_menu_helpers[0]);
-        if(cpu.eip!=return_sentinel || cpu.registers[esp]!=stack+4)
-            throw NativeBoundary(0x2A13B0,"original menu layout has an unexpected ABI");
+        for(presentation_replay=0;presentation_replay<presentation_count;++presentation_replay) {
+            const auto& job=presentations[presentation_replay];
+            memory.store<std::uint32_t>(stack,return_sentinel);
+            cpu.registers=job.layout->frame_bytes?saved:job.registers;cpu.flags=job.flags;
+            cpu.registers[esp]=stack;cpu.eip=0;
+            if(!job.layout->frame_bytes) std::memcpy(memory.access(stack+4,job.layout->argument_bytes),job.frame.data(),job.layout->argument_bytes);
+            invoke_native(cpu,memory,job.layout->entry);
+            if(cpu.eip!=return_sentinel || cpu.registers[esp]!=stack+4)
+                throw NativeBoundary(job.layout->entry,"original frame presentation has an unexpected ABI");
+        }
         cpu.registers=saved;cpu.flags=flags;cpu.eip=pc;
     }
     bool take_goal(Cpu& cpu,std::uint32_t query) {
@@ -1138,12 +1150,14 @@ struct Xbox::State {
         if(!in_frame_loop && (mode!=timing_mode || scene!=timing_scene)) {source_clock={};++timing_epochs;}
         if(!in_frame_loop) {timing_mode=mode;timing_scene=scene;}
         const bool main_frame=in_frame_loop && memory.load<std::uint32_t>(cpu.registers[esp])==0x66E7D;
+        const bool movie=movie_sync();
+        // Start playback with a fresh epoch, excluding time spent prebuffering.
+        if(movie!=movie_pacing) {source_clock={};movie_pacing=movie;++timing_epochs;}
         const auto now=FrameClock::Clock::now();source_clock.due(main_frame?render_rate():60,now);source_clock.advance(now);
-        // E5990 immediately follows this wait. Active movie playback makes
-        // that original function wait on the independent 60 Hz video clock.
-        // Keep its SDK side effects and let it own pacing for those frames.
-        const bool movie_wait=memory.load<std::uint32_t>(0x756080) && memory.load<std::uint8_t>(0x756088);
-        if(!movie_wait) while(FrameClock::Clock::now()<source_clock.next()) yield(ThreadState::waiting,0,source_clock.next());
+        // The common deadline also owns E5990's movie synchronization. Retain
+        // overdue slots: a costly decoded frame can use the following cheap
+        // frame's budget without losing subtitle/controller ticks to a new wait.
+        while(FrameClock::Clock::now()<source_clock.next()) yield(ThreadState::waiting,0,source_clock.next());
         timing_finished=FrameClock::Clock::now();if(!simulation_steps) timing_started=timing_finished;
         if(main_frame && render_rate()!=60) source_clock.discard_overrun(timing_finished);
         if(!main_frame || frame_step.logic) ++simulation_steps;
@@ -3256,12 +3270,12 @@ void native_stage_group_time(Cpu& cpu,Memory& memory) {
     if(&host.memory!=&memory) throw NativeBoundary(cpu.eip,"stage group clock received another guest memory");
     HostFloatingScope floating(cpu.floating);host.sample_stage_group_time(cpu);
 }
-void native_menu_layout(Cpu& cpu,Memory& memory,bool record) {
+void native_menu_layout(Cpu& cpu,Memory& memory,std::uint32_t entry,bool record) {
     if(!cpu.kernel || !cpu.kernel->context || cpu.kernel->entries[255]!=Xbox::State::dispatch_kernel<255>)
         throw NativeBoundary(cpu.eip,"menu drawing requires the Xbox host provider");
     auto& host=*static_cast<Xbox::State*>(cpu.kernel->context);
     if(&host.memory!=&memory) throw NativeBoundary(cpu.eip,"menu drawing received another guest memory");
-    host.draw_menu_layout(cpu,record);
+    host.draw_menu_layout(cpu,entry,record);
 }
 void native_sample_goals(Cpu& cpu,Memory& memory) {
     if(!cpu.kernel || !cpu.kernel->context || cpu.kernel->entries[255]!=Xbox::State::dispatch_kernel<255>)

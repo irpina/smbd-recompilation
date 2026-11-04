@@ -1,3 +1,84 @@
+Screen-rectangle coverage: current implementation (2026-11-03)
+
+Supported USA XBE SHA-256:
+9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2
+
+The earlier solid-sprite correction was incomplete: scene copies, projected
+image effects and partial depth masks still used separate coordinate patches.
+Those patches, the sprite60 restriction and the dialog descriptor modification
+have now been removed. The historical implementations below are superseded.
+
+Current implementation
+
+The verified immediate frontend31200..31462 builds the plain XYZ, colour and
+UV quad layouts. One hook at313B0 (original bytesA174EF6D00) calls
+align_screen_rectangle in src/cpu.cpp before the original packet submission.
+This includes folded tail-call bodies and every quad within a batched draw.
+There is no overlay caller address, sprite/texture ID or fixed screen size in
+the coverage policy. Original assets and caller descriptors stay unchanged.
+
+The helper uses the same projection * model/view matrix that2F790 uploads to
+k96..99, plus the current SDK viewport. It recognizes complete viewport quads,
+full legacy-canvas rectangles under wider orthographic projections, and depth
+masks. Depth masks are identified by their rendering operation: plain XYZ with
+blending ZERO + destination ONE and ADD, which preserves all colour/alpha.
+This covers subrectangles such as the minimap mask, not only full-screen quads.
+
+Edges are completed on the NV2A1/16 grid with outward1/32 raster coverage.
+The conversion inverts signed truncation, so a positive viewport origin gets
+the same margin as origin0. A single fixed subtraction does not achieve this.
+UVs and optional packed colours follow the resulting raster edges; copied
+texels retain their pixel alignment. Nonrectangular, nonplanar, partial UI and
+normal/skinning geometry are excluded. Projection, depth and draw order remain
+original. Scratch storage is fixed per quad; there is no scan, cache or allocation.
+
+Caller audit
+
+Reused original CFGs and the native reference index, then verified the remaining
+small ranges. The index contains91 actual calls to31200 and12 literal data
+words with the same numeric value. All91 calls have original producer evidence.
+Of those,90 close through313B0. The remaining original24F440 builds a quad but
+does not submit its reserved packet before restoring the camera throughB4CA0.
+320780 reserves without advancing the SDK put pointer;3207A0 commits it. That
+original unsubmitted work is preserved, not treated as a rendered overlay.
+
+The other direct SDK immediate paths are text quads247150/247530 (called by
+assertion/message routines) and the texture-copy triangle31FCD0. Vertex-buffer
+draws go through21570/31ED00. Native integer image blits, presentation and ImGui
+already use their native coordinate contracts; they are not title-quad patches.
+Evidence: build/checks/overlay-audit/caller-inventory.json, shared-original/,
+state-original/, mask-state-original/, direct-owned-original/ and push-original/.
+
+Validation on AMD Ryzen5 5600X / NVIDIA GeForce RTX5060Ti
+
+- Both release executables rebuilt with one compiler/linker worker;10629
+  compiled functions, zero unresolved sites. Existing22 CPU checks pass.
+-20 native cases include six actual captured quad families, perspective and
+  orthographic projections, wider canvases, offset viewports, packed colour,
+  two UV sets and batched/mixed quads. Ordinary partial, rotated, zero-width,
+  nonplanar, triangle and normal-layout inputs remain byte-identical. Aligned
+  image-copy completion is stable if repeated. Depth and matrices are preserved.
+-144 offscreen cases cover nine families at scales1..4 crossed with AA off
+  and MSAA2/4/8:331776000 pixels, zero RGB/alpha error and zero D3D11 errors.
+  Source-pattern copies match at every pixel, including projected image effects,
+  16:9/21:9 legacy canvases and the viewport at(72,48) sized160x120. White-target
+  dimming controls and the depth-mask leakage fixture pass independently.
+- The supplied62-draw Golf frame still changes exactly1119 RGB pixels: only
+  its exposed top row and left column. Every interior pixel is unchanged.
+- A hidden/muted Composition run completed180 logic ticks using the saved
+  benchmark profile, with no mode/ball-state changes or capture errors. Its
+  short timing window was5.74ms median/8.37ms p99; this does not meet360FPS.
+  The first attempt with current user saves stalled at stage selection. No
+  save/profile changes were made to make that script pass; a private copy of
+  the previously verified benchmark save was used for the completed run.
+
+Reports: build/checks/overlay-audit/{native-results,raster-report,caller-inventory,
+cpu}.json and runtime-reference/benchmark.json. Rendering images/results are in
+raster-20261103-115346. The original captures are untouched. These are native
+correctness checks, not original-Xbox visual-parity or360FPS acceptance claims.
+
+Historical implementation notes follow
+
 Golf pause-background coverage (2026-11-02)
 
 Verified USA XBE SHA-256:
@@ -6,8 +87,8 @@ build/logs/golf-pause-disc.json verifies the installed executable against the XI
 
 Capture: build/captures/frame-1793642757414-699773277100, 62 draws,
 3x native resolution, MSAA4, anisotropy16, presented at 16:9.
-Draw0 copies and darkens the paused Golf scene. The white lines are the target's
-white clear showing beyond that rectangle, rather than a separate overlay asset.
+Draw0 copies the paused Golf scene; the final sprite supplies the dimming. The
+original white lines are the target's white clear beyond the scene-copy rectangle.
 
 Original pause path 00014C30 calls the shared whole-scene copy 0005B570 at
 00014CBC. The other original caller is 0023EDBF. Bounded executable analysis
@@ -53,3 +134,52 @@ performance. Full gameplay remains available for the user's manual check.
 Independent pixel-coordinate references:
 https://learn.microsoft.com/en-us/windows/win32/direct3d9/directly-mapping-texels-to-pixels
 https://learn.microsoft.com/en-us/windows/win32/direct3d10/d3d10-graphics-programming-guide-resources-coordinates
+
+Shared solid-backdrop coverage (2026-11-03, same verified executable)
+
+Capture: build/captures/frame-1793724168825-1686088323100, 62 draws,
+1x resolution, AA off, 4:3. Draw0 already contains the corrected scene-copy
+vertices above and covers the target. The remaining gap belongs to draw61,
+the black dimming sprite emitted by 373F0 through shared sprite routine75400.
+Its original centre constants at37891C/378918 are320.1/240.1. Native execution
+of75400 from the supplied snapshot reproduces its80 vertex bytes exactly:
+XY bounds0.100006..640.100006 and0.100006..480.100006. After viewport offset,
+1/16 truncation and raster bias, its upper/left edges lie at0.59375 pixels.
+The first D3D11 sample at0.5 is therefore uncovered even at native resolution.
+
+The correction now belongs to the shared solid-sprite quad setup at7568E
+(verified original bytes8B4634), after anchor, rotation and scale. Solid8x8
+sprite60 rectangles whose bounds round to the full logical screen receive
+pixel-edge alignment there. Edges already beyond the screen stay oversized.
+Partial, rotated, reversed and zero-area rectangles remain unchanged, as do
+perspective sprites. Only private XY bounds change; descriptors, depth, UVs,
+colour, alpha and timing remain original. Global geometry/raster offsets are
+unchanged. This handles pause, dialog and fade callers together.
+
+The separate76FB9 fade adjustment and the dialog descriptor's centre/edge
+adjustments have been removed. The dialog's aspect-dependent width remains.
+The earlier scene-copy and minimap-depth corrections use different producers
+and remain in place. The renderer and shader bank did not change.
+
+Validation on NVIDIA GeForce RTX5060Ti:
+- Rebuilt both release executables with one compiler/linker worker;10629
+  compiled functions and zero unresolved sites. Existing22 CPU checks pass.
+- Restoring the captured read-only scene target291 as a replay texture gives
+  zero changed RGB pixels before the correction. The original capture is intact.
+- Replacing only draw61 with its newly generated native vertex payload changes
+  exactly1119 RGB pixels: the top row and left column. Every other pixel matches.
+- Nine native before/after cases cover pause/dialog/fade/wider backdrops and
+  partial/short/rotated/zero-width/reversed rectangles. Caller descriptors remain
+  byte-identical; packet changes are confined to XY. All five negative cases
+  produce byte-identical packets.
+- The actual dimming draw over an independent white target produces uniform
+  RGB128/alpha191 at every pixel in16 sequential cases: scales1/2/3/4 crossed
+  with AA off/MSAA2/4/8. All36864000 pixels pass exactly; no D3D11 errors.
+
+Reports, bounded native recipes and replay fixtures:
+  build/checks/overlay-root/report.json
+  build/checks/overlay-root/native-results.json
+  build/checks/overlay-root/coverage-results.json
+Corrected preview: build/checks/overlay-root/corrected/frame.png.
+No gameplay session or computer-use automation was launched. These checks
+establish native draw/coverage correctness, not original-Xbox visual parity.

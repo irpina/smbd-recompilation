@@ -1,0 +1,14 @@
+{
+  "source_sha256": "9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2",
+  "goal_to_replay_ticks": 183,
+  "evidence": "First story stage route and accepted 60 Hz transition, true_refresh.txt. State barriers use original globals; inputs use logical ticks, not rendered frames.",
+  "input": [
+    "0 none", "240 a", "252 none", "300 start", "312 none", "360 start", "372 none", "420 start", "432 none", "480 start", "492 none", "540 start", "552 none",
+    "wait32 008B2680 000000FF 00000008 a", "0 none", "12 none",
+    "wait32 006C9288 0000FFFF 00000007 a", "0 none", "12 none",
+    "wait32 006C9288 0000FFFF 0000000B start", "0 none", "12 none",
+    "wait32 006C9288 0000FFFF 0000000D a", "0 none", "12 none",
+    "wait32 00738DF0 FF000000 00000000 none", "wait32 00738DF0 FF000000 20000000 none",
+    "0 none 0 1", "1200 none 0 0"
+  ]
+}

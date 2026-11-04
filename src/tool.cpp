@@ -60,7 +60,15 @@ std::string check_timing() {
     FrameClock fractional;fractional.due(144,start);
     for(unsigned i=0;i<144000;++i) fractional.advance(start);
     require(fractional.next()==start+seconds(1000));
-    return std::format("{{\"format\":\"smbd-timing-check-v1\",\"scope\":\"clock_scheduling_only\",\"game_booted\":false,\"scene_rendering_checked\":false,\"motion_sampling_checked\":false,\"passed\":true,\"checks\":{},\"simulation_hz\":60,\"interpolation\":false,\"rates\":[{}]}}",checks,results.str());
+    for(const auto decode_ms:{8,20}) {
+        FrameClock movie;movie.due(60,start);auto now=start;
+        for(unsigned frame=0;frame<600;++frame) {
+            now+=milliseconds(frame%2?2:decode_ms);
+            movie.advance(now);now=std::max(now,movie.next());
+        }
+        require(now==start+seconds(10));
+    }
+    return std::format("{{\"format\":\"smbd-timing-check-v1\",\"scope\":\"clock_scheduling_only\",\"game_booted\":false,\"scene_rendering_checked\":false,\"motion_sampling_checked\":false,\"passed\":true,\"checks\":{},\"simulation_hz\":60,\"interpolation\":false,\"late_frame_workloads_ms\":[[8,2],[20,2]],\"late_frame_ticks\":600,\"rates\":[{}]}}",checks,results.str());
 }
 std::uint32_t number(std::string_view text) {
     auto value = smbd::utf8(text);
@@ -99,7 +107,7 @@ constexpr auto usage =
 #ifdef SMBD_HAS_BATCH
     "  smbd-tool check-cpu XBE\n"
     "  smbd-tool check-services XBE ISO NEW_OUTPUT_DIRECTORY\n"
-    "  smbd-tool probe-cpu XBE CAPTURE_DIRECTORY RECIPE.txt NEW_OUTPUT.json\n"
+    "  smbd-tool probe-cpu XBE CAPTURE_DIRECTORY_OR_- RECIPE.txt NEW_OUTPUT.json\n"
     "  smbd-tool check-input\n"
     "  smbd-tool check-audio\n"
     "  smbd-tool check-image-copy [--warp] [--msaa 2|4|8]\n"

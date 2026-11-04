@@ -129,6 +129,9 @@ normalized; other camera controllers keep their original rule cadence and
 their subsequent view transforms still run for each scene. The eleven
 proved actor callbacks at 9DAFC share the continuously sampled pose path;
 their separate state/facing controllers retain the original cadence.
+The animation-specific 97D37 and 9C58B lowerings here were replaced in the
+playhead follow-up in timing_workflow.txt. The full original advance now
+owns clip boundaries, with fractional time supplied to the pose sampler.
 
 Both goal queries still execute original swept-rectangle code. The primary
 12F30 query receives ECX=ball and three caller-cleaned output pointers for
@@ -411,6 +414,9 @@ The original animation speed, end prediction and controller cadence remain.
 The old completed-goal capture at frame-1793323391110-43566271600 supplies
 the valid character/assets for accepted-goal-completion.json: before-end,
 normal end-window, looped-between-ticks and intermediate-scene cases pass.
+The later playhead split in timing_workflow.txt removes the intermediate
+loop that required the latched fallback. The end-window query and the
+original flag producer now run at their original rule cadence.
 
 Replay ball types 8/10 use 8CAF0 and the original fractional sampler 27A2E0.
 They now sample each scene. The countdown subtraction at 8CB22 uses the
@@ -467,3 +473,175 @@ maximum jump below 0.000317. Full values are in accepted-summary.json.
 accepted-144-capture/frame.png is the rendered replay sample. These are
 focused runtime/numeric checks, not manual visual confirmation or a 360 FPS
 performance claim. User settings and saves were not changed.
+
+Character reactions, goal flight and Gift presentation (2026-11-03)
+
+Verified USA XBE SHA256:
+9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2.
+Bounded original analyses, snapshot recipes, before/after results and silent
+runtime reports are in build/checks/refresh-reactions/; report.json collects
+the accepted numeric checks. No game instructions are decoded at runtime.
+
+The shared BALL post-step at 8C330 measures rolling displacement at +C0,
+its previous magnitude at +CC, and relative rotation at +B0..BC from two
+successive ball transforms. APE 8BF80/88CA0/89070 use those measurements
+for standing, loss of footing and tumbling. The high-refresh conversion
+left the displacement in scene units and both angular thresholds in whole
+tick units. In addition, 88CA0 applied its nonlinear quaternion response
+directly to a fractional rotation, then applied a full recovery turn.
+Smaller intervals therefore suppressed the original high-speed reaction.
+
+8C5A4 now converts the completed +C0 vector to original per-tick velocity;
+the next +CC measurement naturally reads that velocity. C330's upper
+angular dead zone at 8C697 and the ape recovery threshold at 88ED0 use
+cos(acos(original_cosine)*delta). The negative near-antiparallel guard
+remains unchanged. Around the original 88CFD..88D64 response, the relative
+quaternion is raised to 1/delta, processed by the original game instructions,
+then raised to delta. Thus the original response sees the same angular
+speed at every refresh rate. Recovery and heading turns at 88FF1/891C0
+retain fractional integer angle units. Live play and replay types 8/10
+share these measurements and consumers; there is no separate replay fix.
+
+A3530 dispatches scripted character controllers. Goal controller 3's
+state 3 (A304A..A3069) contains only the persistent flight rotation.
+That presentation state now runs every scene, with the original 0xE38
+turn at A3059 scaled by the scene interval. Other states and controllers
+retain their 60 Hz event cadence. The outer 9D9E4 call no longer prevents
+this continuous state from executing between controller ticks.
+
+Native before/after probes execute actual compiled original routines with
+captured assets. A one-tick high-speed case originally returned rotation
+(0,0,0.17584662,0.98441756) at 60 Hz but approximately identity after six
+fractional scenes. Both now give the same quaternion. Over five ticks,
+60/144/360 schedules agree within 0.00000024 per quaternion component for
+rolling and goal flight. Every intermediate goal scene advances instead
+of holding for five scenes then jumping. All sampled 60 Hz quaternion
+bytes remain identical to the previous executable.
+
+Replay sampling through original 8CAF0 -> 8C330 confirms that +C0 now has
+per-tick units at 360 Hz, while +CC carries the previous normalized speed.
+These isolated measurement probes disable only the descriptor's optional
+sound/particle callbacks, because probe-cpu has no Xbox host provider.
+Earlier probes which entered those callbacks fail explicitly on unbound
+RtlEnterCriticalSection; they are not acceptance results or API substitutes.
+Playback, seek, pause, recorder boundary sampling and replay-camera probes
+retain their previous results; all four goal completion cases also pass.
+
+Options table 6AB898 routes Gift menu 98 through 2A5D80 to 2B7860. The
+controller combines input/unlocks at 2B7860..2B7E14 with immediate drawing
+at 2B7E15..2B8E11. The rule-only mode update skipped this drawing on every
+intermediate scene. The shared original-menu continuation bridge now
+retains registers, flags and bounded local frames for both character
+selection (B4 bytes) and Gift (308 bytes). It resumes the original drawing
+after the verified prologue on each intermediate scene. Controller state
+and Gift's counter at 2B8E16 still advance only on rule ticks. Drawing is
+rebuilt by the game; vertices and GPU packets are not cached or duplicated.
+
+The silent 360-limit Gift route reaches menu 98 and samples 512 consecutive
+scenes. Before: 397 intermediate scenes omit 175 draws; after: all 511
+adjacent intervals contain the same 490 draws. The existing Game Data
+menu capture remains uniform at 356 draws per interval. Screenshots are
+available in before-gift-final-capture/ and after-gift-capture/.
+
+Silent 60/144/360 gameplay routes complete all six input barriers, enter
+the goal, play the replay and finish without an unresolved-call boundary.
+They collect 750/1800/3500 scene samples and each take 183 rule ticks from
+the first goal state to replay entry. The uncaptured 60/360 runs take
+3.047455/3.049556 seconds. The 144 run also writes a full frame snapshot
+at tick 2820, so its 3.394872-second wall interval includes capture I/O;
+it is not a frame-time measurement. No 360 FPS performance claim is made.
+Checks pass: CPU 23, clock 31, SDL input 58, audio 37, native services 196.
+Game/tool builds use three compiler/linker workers, compile all 10632
+functions and leave zero unresolved reachable sites. User settings and
+saves are unchanged. Visual checking in the live game remains manual.
+
+Remaining shared timing paths audit (2026-11-03)
+
+Target remains the verified 9B49918B...B3349DC2 USA XBE above. Reused the
+indexed call graph and original analyses, then inspected bounded controller,
+event, pose and render families. Evidence: build/checks/refresh-audit/.
+
+The 22 event families have three distinct contracts. STAGE, WORLD, BALL,
+APE, OBJ_COLLISION and the converted CAMERA paths sample physical motion
+each scene. STOBJ, ITEM, SPRITE and BACKGROUND already have separate update
+and transform/draw boundaries; their stateful callbacks use rule time.
+RECPLAY, NAME_ENTRY, INFO, COURSE, VIBRATION, COMMEND, VIEW, EFFECT, MINIMAP,
+MOUSE, SOUND and REND_EFC retain rule cadence. INFO still latches swept goal
+crossings from intermediate physics scenes. Party handlers which have not
+been converted to fractional physics keep their original 60 Hz simulation.
+
+EFFECT 4DB90 updates the lifetime at 4DBE6 and dispatches updates through
+4B2DB0 at 4DC26. The old gate at 4DC3D was on deletion, so it neither timed
+updates nor consistently timed destruction. The complete update/lifetime/
+destruction event now shares rule cadence. Its original draw consumers still
+run each scene. The bounded update-call walk reached 249 functions without
+an immediate draw submission (construction paths were treated separately).
+Ball trail/ground emission at 8B5B0/8B9D0 is periodic; those producers now
+share the same cadence. 8AEA0 remains an impact producer. Its triggering
+flag is refreshed by collision, so it must still run between rule ticks.
+
+8B690 similarly contains both periodic and transient work. The sections
+before 8B86D and after 8B8DA update voice counters and looping sounds at rule
+cadence. The intervening section consumes collision severity bits 27..31
+from BALL+98 every scene. C330 clears those bits before the next collision
+step; gating the whole sound callback would lose an impact. The native
+queue probe observes one new slot at 764E20 from a fractional impact, no
+periodic requests and no change to the voice timer. A whole-callback gate
+in an intermediate build loses that event; it was replaced before delivery.
+
+BALL size effects use original +148 duration and +68/+14C size fields.
+8BC90 decrements only on rule ticks, keeping the original signed branch.
+8BC7C/8BCD1 sample the original exponential response each scene. A shared
+ball-handler policy now supplies the producer interval to rolling velocity
+and quaternion measurement. A whole-tick transform from a legacy handler
+must not be divided by the display interval. The type-2 quaternion probe
+is byte-identical with whole-tick and fractional display contexts.
+
+The additional falling/head turn limits at 898DC/906C0 use the same angle
+accumulation as the previously converted heading/recovery turns. 89450
+and 10E350 mix descriptor selection with persistent body rotation;
+895B8, 893C0 and 10E4FB use scene intervals. Their event and counter writes
+remain on rule ticks, and their shared 9ABE0 descriptor request now owns
+the rule gate. Other inspected selector transforms are temporary inputs to
+selection/footing, not persistent rotations. Animation completion now uses
+the shared 9AEA0 predicate instead of the former goal-only A2FF9 override.
+The completed-clip flag from 9C59E is cleared when the active clip changes
+(9C66B). It survives a loop between rule updates. FrameStep retains the
+source interval independently of a legacy caller's temporary delta=1,
+so that predicate works for all scripted controllers without changing its
+original full-tick behavior.
+
+The remaining mode draw paths were traced from 15A90 using the verified
+call graph. Setup/deletion and graphics-context restore paths are not
+recurring presentation. Registered sprite/font callbacks already run via
+6A1E0. One ordered, bounded presentation list now covers the original
+character-select, saved-replay and Gift continuations (2A13B0, 2A5D50,
+2A5D80), common menu labels (2A9970), and the party HUDs at 1D3890/1E0470.
+The 2B71A0 replay controller has 58 bytes of stack state at 2B7233; its
+2B77D9 counter remains on rule ticks. The two original random clip
+selection branches in 1E0470 remain rule-only. Whole presentation routines
+retain verified arguments; mixed routines resume after their original
+prologue. Drawing uses the actual scene interval even inside a legacy
+controller. No cached GPU packets, duplicate input handling or changes to
+the shared screen-primitive sizing code are involved.
+
+Native five-tick probes: the effect lifetime remains 25 from 30 at all
+three schedules (before, it reached zero at 360); the size timer remains
+10 from 15 (before, it reached -1). Size differs by under 0.00000012 across
+60/144/360, and the additional spin quaternion differs by under 0.00000019.
+All corresponding 60 Hz samples are byte-identical to the prior build.
+The original goal completion, pose cadence, recorder, camera, replay
+pause and seek probes pass. CPU 23, clock 31, SDL input 58, audio 37 and
+native services 196 checks pass.
+
+Silent 60/144/360 main-game runs finish all six input barriers and enter
+replay after the same 183 ticks (about 3.05 seconds). The final impact
+split was also rerun at the 360 limit with the actual Xbox host. The Options
+and Gift routes exit normally; all 512 Gift samples retain the custom
+drawing, with only a five-draw variation rather than the original 175-draw
+omission. The background varies with scene motion. Saved-replay loading's
+no-data branch was exercised; the populated browser continuation and the
+two party HUD routines were checked statically. This is not an exhaustive
+party-mode playthrough or a 360 FPS performance claim. All 10632 functions
+compile with zero unresolved reachable sites. User settings/saves were
+untouched; all automated game runs were hidden and muted.

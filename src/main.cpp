@@ -445,13 +445,18 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
             const auto sample_frame=ordinary(animation)?value(animation+0x4C):-1.0f;
             const auto sample_speed=ordinary(animation)?value(animation+0x48):-1.0f;
             const auto counters=running->performance_counters();
-            motion_samples.push_back(std::format("{{\"frame\":{},\"ticks\":{},\"seconds\":{:.9f},\"delta\":{:.9g},\"scene\":{},\"ball_state\":{},\"ball\":[{:.9g},{:.9g},{:.9g}],\"matrix\":[{:.9g},{:.9g},{:.9g}],\"camera\":[{:.9g},{:.9g},{:.9g}],\"stage_time\":{:.9g},\"animation_frame\":{:.9g},\"animation_speed\":{:.9g},\"draws\":{},\"rule_tick\":{},\"mode\":{},\"mode_timer\":{},\"course_flags\":{},\"ball_flags\":{},\"ape_flags\":{},\"replay_time\":{:.9g},\"camera_state\":{},\"velocity\":[{:.9g},{:.9g},{:.9g}],\"requested_animation\":{},\"current_animation\":{},\"animation_end\":{:.9g},\"animation_loops\":{}}}",
+            const auto movie=memory.load<std::uint32_t>(0x756080);
+            const auto caption=memory.load<std::uint32_t>(0x567A98);
+            const int caption_ticks=movie && ordinary(caption) && memory.load<std::uint32_t>(0x6C9364)==0 && memory.load<std::uint32_t>(0x6C9354)==8?
+                23*memory.load<std::uint8_t>(caption+0x0C)+memory.load<std::uint8_t>(caption+0x0E):-1;
+            motion_samples.push_back(std::format("{{\"frame\":{},\"ticks\":{},\"seconds\":{:.9f},\"delta\":{:.9g},\"scene\":{},\"ball_state\":{},\"ball\":[{:.9g},{:.9g},{:.9g}],\"matrix\":[{:.9g},{:.9g},{:.9g}],\"camera\":[{:.9g},{:.9g},{:.9g}],\"stage_time\":{:.9g},\"animation_frame\":{:.9g},\"animation_speed\":{:.9g},\"draws\":{},\"rule_tick\":{},\"mode\":{},\"mode_timer\":{},\"course_flags\":{},\"ball_flags\":{},\"ape_flags\":{},\"replay_time\":{:.9g},\"camera_state\":{},\"velocity\":[{:.9g},{:.9g},{:.9g}],\"requested_animation\":{},\"current_animation\":{},\"animation_end\":{:.9g},\"animation_loops\":{},\"movie_frames\":{},\"movie_frames_skipped\":{},\"movie_sync\":{},\"caption_ticks\":{}}}",
                 frames,logic_ticks,std::chrono::duration<double>(last_source-first_source).count(),smbd::frame_step.delta,memory.load<std::uint16_t>(0x6C9288),memory.load<std::uint8_t>(0x738DF3),
                 value(0x738DF4),value(0x738DF8),value(0x738DFC),value(0x738E2C),value(0x738E3C),value(0x738E4C),
                 value(0x73F1A0),value(0x73F1A4),value(0x73F1A8),value(0x72FF84),std::isfinite(sample_frame)?sample_frame:-1,std::isfinite(sample_speed)?sample_speed:-1,counters[0],
                 smbd::frame_step.logic,memory.load<std::uint32_t>(0x6C9354),std::bit_cast<std::int32_t>(memory.load<std::uint32_t>(0x6C92F0)),memory.load<std::uint32_t>(0x6C92F8),
                 memory.load<std::uint32_t>(0x738E88),ordinary(ape)?memory.load<std::uint32_t>(ape+0x248):0,value(0x8AFA90),memory.load<std::uint8_t>(0x73F1BE),
-                value(0x738E0C),value(0x738E10),value(0x738E14),ordinary(ape)?memory.load<std::uint32_t>(ape+0x70):0,ordinary(ape)?memory.load<std::uint32_t>(ape+0x7C):0,ordinary(animation)?value(animation+0x50):0,ordinary(animation)?memory.load<std::uint32_t>(animation+0x54):0));
+                value(0x738E0C),value(0x738E10),value(0x738E14),ordinary(ape)?memory.load<std::uint32_t>(ape+0x70):0,ordinary(ape)?memory.load<std::uint32_t>(ape+0x7C):0,ordinary(animation)?value(animation+0x50):0,ordinary(animation)?memory.load<std::uint32_t>(animation+0x54):0,
+                ordinary(movie)?std::bit_cast<std::int32_t>(memory.load<std::uint32_t>(movie+0x80)):-1,ordinary(movie)?memory.load<std::uint32_t>(movie+0x88):0,memory.load<std::uint8_t>(0x756088)!=0,caption_ticks));
         }
         const auto rate=presentation_rate(settings,ui);
         if(!rate || rate>=60 || display_clock.due(rate,last_source)) display_frame();

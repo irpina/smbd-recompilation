@@ -100,3 +100,131 @@ Independent instruction contract
   FFD0 calls the address in EAX and saves the following instruction address.
   This independently confirms the target and return-stack interpretation used
   by the original-byte proof and native diagnostic.
+
+Baseball player-update supplement, 2026-11-03
+  Supported executable SHA256 remains
+  9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2.
+  User report: build/logs/game-stopped-1793730201554.json. At 0009DAFC,
+  CALL [EAX+5C] rejects 0022CE30; EAX=0554ACA0 is the valid player actor,
+  ECX=0022CE30, and the recorded actor header contains the same callback.
+  This is a separate, incomplete actor callback catalogue, following the UI
+  callback correction above. It is not another allocation failure.
+
+  Original constructors 235B50 and 236B50 each build six players through
+  238CF0. Players 0/1 receive 22CC90; players 2..5 receive 22CE30. The earlier
+  idle-demo proof incorrectly said all Baseball callers supplied only 22CC90.
+  Original PUSH 0022CE30 instructions and their following constructor calls:
+    235BFB -> 235C19    235C23 -> 235C41
+    235C4B -> 235C69    235C73 -> 235C91
+    236BC3 -> 236BDC    236BE6 -> 236BFF
+    236C09 -> 236C22    236C2C -> 236C45
+  Each PUSH is 6830CE2200. The saved callback remains on the stack across
+  helpers 2339A0/2339C0/2339E0/233A00 and 238960/238990: complete original
+  CFGs show their balanced internal pushes and plain RETs, with no write to
+  the saved callback. Wrapper 238CF0 forwards its zero-based argument 6 as
+  creator 8C1A0's argument 5. The creator stores it in actor+5C at 8C2CE.
+
+  One bounded batch covers 23 distinct constructor/wrapper owner entries,
+  including their shared tails. Fresh native reference inventories find
+  exactly 35 distinct direct constructor/wrapper calls (9/11/15 to
+  8C1A0/8C300/238CF0). Every reference matches original bytes and a complete
+  owner CFG. Eight references to 22CE30 are exactly the source words above.
+  Remaining constructor arguments retain the eleven previously admitted
+  callbacks, including the default. Neither Baseball update routine writes
+  another callback into actor+5C. The existing width-aware header-write
+  inventory was refreshed, preserving the previously proved lifetime rules.
+
+  Generic analyse-arguments deliberately stops at intervening calls. Its
+  incomplete reports for the Baseball wrappers are not closure evidence;
+  the saved original caller and helper CFGs establish these stack arguments.
+  Two overlapping owner CFGs yield 37 argument records but only 35 unique
+  call sites. Do not count shared-tail records as additional publications.
+
+  Add original source word 235BFC to the shared 9DAFC target group, making
+  twelve verified callbacks. All eight alternate publications use that same
+  original routine; they do not need separate runtime exceptions. Native
+  before/after analysis verifies exactly 22CE30 was added, nothing removed,
+  and unrelated compiled entry 73900 remains outside the domain. Original
+  null handling, argument passing, fallback and strict guard remain intact.
+  The alternate update was already compiled: all 545 compiled entries in
+  22CB40..240000 have closed static control flow. Analysis still compiles
+  all 10,629 functions with zero unresolved sites.
+
+  Research and native reports: build/checks/baseball-recovery/.
+  reproduced-before.json reproduces the user's exact guard rejection through
+  original 9DAB0, using an isolated fixture in a saved memory snapshot.
+  actor-domain-comparison.json records the complete 11-to-12 target change.
+  verified-constructor-references.json ties all 35 references to owner CFGs;
+  constructors/, arguments/ and helpers/ retain bounded original evidence.
+  No gameplay session or computer-use control is needed for this recovery.
+
+  Validation completed: Analysis/Game stages and the diagnostics executable
+  rebuild with one worker. All 23 native CPU checks pass, including original
+  9DAB0 dispatch to both Baseball callbacks in each of the eight player slots
+  (16 calls), exact callback arguments/return addresses, and rejection of an
+  unrelated compiled target. This checks entry into the original callback;
+  full Baseball gameplay remains a manual check. No callback is stubbed.
+  Build warnings are the existing decoder aggregate initializer and discarded
+  old profile counts for the changed 9DAB0 switch. No worker process remains.
+  Final reports: cpu-after.json and validation.json in the research directory.
+
+Baseball phase-loop supplement, 2026-11-03
+  User report: build/logs/game-stopped-1793731276077.json, same supported XBE.
+  Original CALL EAX at 2335A1 rejects 233200. This is the phase loop 233550,
+  separate from the actor-update loop. The earlier phase proof incorrectly
+  treated its indexed writer list as complete. Its nine callbacks omitted
+  four transitions from already compiled callbacks 2333B0 and 233480:
+    233400 / source word 233406 -> 233180
+    23344E / source word 233454 -> 233260
+    233496 / source word 23349C -> 233200 (also written at 2334B6)
+    2334CD / source word 2334D3 -> 232F20
+
+  The native reference scan finds 31 original references to pending word
+  87946C: 30 stores and one dispatch reload. Every byte reference is matched
+  against a complete original owner CFG. Twenty-six stores are immediate;
+  the four register stores publish zero, proved by the nearby XOR ECX,ECX
+  in 233060/2330B0/233100 and initial EAX/ECX clearing in 233550.
+  All nonzero stored literals and initial callback 2334E0 give thirteen
+  distinct targets. Following every callback's outgoing writes reaches that
+  same set, including both branches of each conditional transition. Current
+  and previous callback words are not copied into the pending slot.
+
+  A broader native inventory verifies all 193 references to the phase-state
+  block 879454..879478. Each is a direct memory access; there is no pointer
+  publication or adjacent overlapping store to hide another pending writer.
+  Bounded native CFG analysis covers 548 Baseball entries in nine sets,
+  at most 64 entries and 2048 instructions per entry. None exhausts its
+  budget. This includes the three previously uncompiled callbacks 232F20,
+  233180 and 233200. The fourth, 233260, was already compiled.
+
+  The other mutable Baseball callback domains were checked in the same
+  batch. Finish slot 879880 has two argument-based writers, one reader and
+  five direct constructor calls: only null, 236E90 and 23BB50 are published.
+  The scene-row pool has 22 native references and three constructor calls;
+  its existing eight-callback transition set is retained. Intervening helper
+  calls require inspection of the original saved stack arguments; incomplete
+  analyse-arguments reports are not treated as proof. Earlier actor and UI
+  callback corrections remain intact.
+
+  Add the four original source words above to the shared 2335A1 target list.
+  Native before/after analysis changes exactly nine targets to thirteen,
+  adds all four missing targets and removes none. It matches the full
+  writer closure exactly, admitting no extra target. Analysis compiles
+  10,632 original functions with zero unresolved sites. The original loop,
+  null termination, callback execution and strict guards are preserved.
+
+  Research: build/checks/baseball-phase-recovery/ contains the full source
+  inventory, verified reference/owner matches, callback closure and bounded
+  CFGs. Four saved probe recipes execute original 233550 through real phase
+  transitions, reproducing each missing target at the same 2335A1 guard
+  before the correction. The input flags, helper return conditions and
+  finite position vector are derived from original instructions. No game
+  session, computer use, new test framework or callback stub is involved.
+
+  After rebuilding, all four identical probe paths complete through their
+  original callback bodies and return to the sentinel. Each returns AL=1,
+  restores ESP to F00004, clears the pending callback and leaves the expected
+  current/previous phase. phase-state-checks.json checks these state and ABI
+  results. All 23 existing CPU checks pass, retaining the earlier actor/UI
+  coverage. The game and tool are rebuilt; no worker process remains.
+  Full gameplay remains a manual check. Final aggregate: validation.json.

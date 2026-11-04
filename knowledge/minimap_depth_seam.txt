@@ -1,5 +1,10 @@
 Minimap depth-mask seam (2026-11-02)
 
+Implementation update2026-11-03: the dedicated1482AE adjustment described below
+has been removed. The shared313B0 rectangle completion now handles this depth
+mask and other overlay families together. See knowledge/golf_pause_overlay.txt
+and build/checks/overlay-audit for the current policy and144-case validation.
+
 Verified USA XBE SHA-256:
 9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2
 Capture: frame-1793656650204-77247929600,485 draws,3x/MSAA4,21:9.

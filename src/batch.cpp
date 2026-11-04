@@ -21,6 +21,11 @@ struct Unit {
     std::vector<std::uint32_t> fixed_zero_faults;
     std::vector<std::uint32_t> dormant_indirect;
     std::vector<std::string> indirect_instructions,resolved_indirect_instructions,indexed_writes,field_writes;
+    std::vector<std::string> timing_sites,persistent_updates;
+    std::string timing_entry;
+    std::vector<std::pair<std::uint32_t,std::uint32_t>> call_edges;
+    std::vector<std::uint32_t> scene_calls,scene_updates;
+    std::vector<std::pair<std::uint32_t,std::uint32_t>> persistent_sites;
     std::vector<std::uint32_t> static_callbacks;
     std::vector<std::uint32_t> indirect_slots;
     std::vector<std::pair<std::uint32_t,std::uint32_t>> callback_stores;
@@ -42,6 +47,123 @@ void instruction_reports(std::ostream& out,std::span<const std::string> values) 
     out << '[';
     for(std::size_t i=0;i<values.size();++i) {if(i) out<<',';out<<values[i];}
     out << ']';
+}
+// Conservative, basic-block-local recurrence discovery. These are research
+// candidates, not declarations that an ADD is a timer. Reuse decoded functions;
+// do not scan the binary again or keep a second instruction map.
+void collect_persistent_updates(const Function& function,Unit& unit) {
+    struct Source {ZydisDecodedOperand memory;std::uint32_t load,operation=0;bool counter=false;};
+    std::map<ZydisRegister,std::vector<Source>> sources;
+    std::set<std::uint32_t> joins;
+    for(const auto& edge:function.edges) if(edge.to && edge.kind!="call" && edge.kind!="tail-call") joins.insert(*edge.to);
+    const auto reg=[](ZydisRegister r){return ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LEGACY_32,r);};
+    const auto persistent=[](const ZydisDecodedOperand& op) {
+        return op.type==ZYDIS_OPERAND_TYPE_MEMORY && op.mem.base!=ZYDIS_REGISTER_ESP &&
+            op.mem.segment==ZYDIS_REGISTER_DS;
+    };
+    const auto same=[](const ZydisDecodedOperand& a,const ZydisDecodedOperand& b) {
+        return a.size==b.size && a.mem.base==b.mem.base && a.mem.index==b.mem.index &&
+            a.mem.scale==b.mem.scale && a.mem.disp.value==b.mem.disp.value;
+    };
+    std::uint32_t previous_end=0;
+    for(const auto& [pc,ins]:function.instructions) {
+        if(pc!=previous_end || joins.contains(pc)) sources.clear();
+        previous_end=pc+ins.decoded.length;
+        const auto category=ins.decoded.meta.category;
+        if(category==ZYDIS_CATEGORY_CALL || category==ZYDIS_CATEGORY_UNCOND_BR ||
+           category==ZYDIS_CATEGORY_COND_BR || category==ZYDIS_CATEGORY_RET) {sources.clear();continue;}
+        const auto mnemonic=ins.decoded.mnemonic;
+        const bool arithmetic=mnemonic==ZYDIS_MNEMONIC_INC || mnemonic==ZYDIS_MNEMONIC_DEC ||
+            mnemonic==ZYDIS_MNEMONIC_ADD || mnemonic==ZYDIS_MNEMONIC_SUB || mnemonic==ZYDIS_MNEMONIC_IMUL ||
+            mnemonic==ZYDIS_MNEMONIC_SAR || mnemonic==ZYDIS_MNEMONIC_SHR || mnemonic==ZYDIS_MNEMONIC_SHL || mnemonic==ZYDIS_MNEMONIC_NEG ||
+            mnemonic==ZYDIS_MNEMONIC_ADDSS || mnemonic==ZYDIS_MNEMONIC_SUBSS || mnemonic==ZYDIS_MNEMONIC_MULSS ||
+            mnemonic==ZYDIS_MNEMONIC_DIVSS || mnemonic==ZYDIS_MNEMONIC_ADDPS || mnemonic==ZYDIS_MNEMONIC_SUBPS ||
+            mnemonic==ZYDIS_MNEMONIC_MULPS || mnemonic==ZYDIS_MNEMONIC_DIVPS;
+        const bool move=mnemonic==ZYDIS_MNEMONIC_MOV || mnemonic==ZYDIS_MNEMONIC_MOVSS ||
+            mnemonic==ZYDIS_MNEMONIC_MOVAPS || mnemonic==ZYDIS_MNEMONIC_MOVUPS ||
+            mnemonic==ZYDIS_MNEMONIC_MOVSX || mnemonic==ZYDIS_MNEMONIC_MOVZX ||
+            mnemonic==ZYDIS_MNEMONIC_CVTSI2SS || mnemonic==ZYDIS_MNEMONIC_CVTTSS2SI || mnemonic==ZYDIS_MNEMONIC_CVTSS2SI ||
+            mnemonic==ZYDIS_MNEMONIC_CVTSS2SD || mnemonic==ZYDIS_MNEMONIC_CVTSD2SS;
+        std::vector<Source> inputs;
+        if(arithmetic || move) for(unsigned i=0;i<ins.decoded.operand_count_visible;++i) {
+            const auto& op=ins.operands[i];
+            if(!(op.actions&ZYDIS_OPERAND_ACTION_MASK_READ)) continue;
+            if(persistent(op)) inputs.push_back({op,pc,arithmetic?pc:0});
+            if(op.type==ZYDIS_OPERAND_TYPE_REGISTER) {
+                const auto found=sources.find(reg(op.reg.value));
+                if(found!=sources.end()) for(auto source:found->second) {
+                    if(arithmetic) source.operation=pc;
+                    inputs.push_back(source);
+                }
+            }
+        }
+        if(inputs.size()>8) inputs.clear(); // Bound alias uncertainty, never infer through it.
+        // A branch may separate a counter load from its increment and store.
+        // Retain that explicit INC/DEC->store candidate without claiming an
+        // alias proof for the missing load (load=0 in the report).
+        if(inputs.empty() && (mnemonic==ZYDIS_MNEMONIC_INC || mnemonic==ZYDIS_MNEMONIC_DEC))
+            inputs.push_back({{},0,pc,true});
+        for(unsigned i=0;i<ins.decoded.operand_count_visible;++i) {
+            const auto& op=ins.operands[i];
+            if(!(op.actions&ZYDIS_OPERAND_ACTION_MASK_WRITE)) continue;
+            if(persistent(op)) for(const auto& source:inputs) if(source.operation && (source.counter || same(op,source.memory))) {
+                auto report=ins.report();report.pop_back();
+                report+=",\"load\":"+json(hex32(source.load))+",\"operation\":"+json(hex32(source.operation))+
+                    ",\"operation_text\":"+json(function.instructions.at(source.operation).text)+
+                    ",\"base\":"+json(ZydisRegisterGetString(op.mem.base))+
+                    ",\"offset\":"+std::to_string(op.mem.disp.value)+",\"width_bytes\":"+std::to_string(op.size/8)+'}';
+                unit.persistent_updates.push_back(std::move(report));
+                unit.persistent_sites.emplace_back(pc,source.operation);break;
+            }
+            if(op.type==ZYDIS_OPERAND_TYPE_REGISTER) {
+                const auto written=reg(op.reg.value);
+                for(auto& [key,values]:sources) std::erase_if(values,[&](const auto& s) {
+                    return reg(s.memory.mem.base)==written || reg(s.memory.mem.index)==written;
+                });
+                sources[written]=inputs;
+            }
+        }
+    }
+}
+// Follow the actual emitted unconditional rule gates with logic=false. Other
+// data-dependent branches remain possible. This narrows research, not a proof
+// of runtime cadence: dynamic handler selection still needs its own evidence.
+void collect_scene_paths(const Function& function,const LoweredFunction& lowered,Unit& unit) {
+    std::map<std::uint32_t,std::uint32_t> skips;
+    std::multimap<std::uint32_t,const Edge*> edges;
+    for(const auto& edge:function.edges) edges.emplace(edge.from,&edge);
+    for(const auto& [pc,code]:lowered.timing_sites) {
+        const auto gate=code.find("if(!smbd::frame_step.logic) ");
+        if(gate==code.npos) continue;
+        const auto line=std::string_view(code).substr(gate,code.find('\n',gate)-gate);
+        const auto jump=line.find("goto i_");
+        if(jump!=line.npos) skips[pc]=static_cast<std::uint32_t>(std::stoul(std::string(line.substr(jump+7,8)),nullptr,16));
+    }
+    const bool rule_only=lowered.timing_entry.contains("if(!smbd::frame_step.logic) { cpu.eip=");
+    std::vector<std::uint32_t> pending;
+    if(!rule_only) pending.push_back(function.entry==0x14D80?0x14F00:function.entry);
+    std::set<std::uint32_t> seen,executed;
+    while(!pending.empty()) {
+        const auto pc=pending.back();pending.pop_back();
+        if(!seen.insert(pc).second || !function.instructions.contains(pc)) continue;
+        if(skips.contains(pc)) {pending.push_back(skips.at(pc));continue;}
+        executed.insert(pc);
+        const auto& ins=function.instructions.at(pc);
+        const auto [first,last]=edges.equal_range(pc);
+        for(auto it=first;it!=last;++it) if(const auto& edge=*it->second;edge.to) {
+            if(edge.kind=="call" || edge.kind=="tail-call") unit.scene_calls.push_back(*edge.to);
+            else if(function.instructions.contains(*edge.to)) pending.push_back(*edge.to);
+        }
+        if(ins.decoded.meta.category!=ZYDIS_CATEGORY_RET && ins.decoded.meta.category!=ZYDIS_CATEGORY_UNCOND_BR)
+            pending.push_back(pc+ins.decoded.length);
+    }
+    // Native bridges execute these original helpers on intermediate scenes.
+    if(function.entry==0x14D80) unit.scene_calls.insert(unit.scene_calls.end(),native_menu_helpers.begin(),native_menu_helpers.end());
+    if(function.entry==0x13C80) unit.scene_calls.insert(unit.scene_calls.end(),native_goal_queries.begin(),native_goal_queries.end());
+    std::ranges::sort(unit.scene_calls);
+    unit.scene_calls.erase(std::unique(unit.scene_calls.begin(),unit.scene_calls.end()),unit.scene_calls.end());
+    for(const auto& [address,operation]:unit.persistent_sites)
+        if(executed.contains(address) && executed.contains(operation)) unit.scene_updates.push_back(address);
 }
 struct RecoverySite {
     std::string group,instruction;
@@ -339,6 +461,7 @@ Batch recompile_batch(Xbe& image, std::span<const std::uint32_t> seeds,
             }
             for (const auto& edge : function.edges) if ((edge.kind == "call" || edge.kind=="tail-call") && edge.to) {
                 unit.calls.push_back(*edge.to);
+                unit.call_edges.emplace_back(edge.from,*edge.to);
                 schedule(*edge.to);
             }
             for(const auto& edge : function.edges)
@@ -396,6 +519,15 @@ Batch recompile_batch(Xbe& image, std::span<const std::uint32_t> seeds,
             std::ranges::sort(unit.calls);
             unit.calls.erase(std::unique(unit.calls.begin(), unit.calls.end()), unit.calls.end());
             auto lowered = lower(function);
+            if(lowered.native_api.empty()) {
+                collect_persistent_updates(function,unit);
+                collect_scene_paths(function,lowered,unit);
+            }
+            for(const auto& [pc,code]:lowered.timing_sites) {
+                auto site=function.instructions.at(pc).report();site.pop_back();
+                unit.timing_sites.push_back(site+",\"lowering\":"+json(code)+'}');
+            }
+            unit.timing_entry=std::move(lowered.timing_entry);
             unit.source = std::move(lowered.source);
             unit.native_helpers=std::move(lowered.native_helpers);
             unit.floating=lowered.floating;
@@ -560,6 +692,19 @@ Batch recompile_batch(Xbe& image, std::span<const std::uint32_t> seeds,
     recovery_report(report,recovery_sites,object_pointer_stores,absolute_slot_writes,address_uses,units);
     report << ",\"game_reachability\":";
     reachability_report(report,image,game_reachability);
+    // The original 22 event records, not a hand-maintained list of modes that
+    // happened to be exercised. Each read is bounded to one verified table.
+    report << ",\"timing_events\":[";
+    const auto events=image.data(0x477CE8,22*24);
+    for(unsigned i=0;i<22;++i) {
+        if(i) report<<',';
+        const auto name=image.data(u32(events,i*24+4),32);
+        const auto end=std::find(name.begin(),name.end(),std::byte{});
+        if(end==name.end()) throw std::runtime_error("Original frame event name exceeds its bound");
+        report<<"{\"name\":"<<json(std::string_view(reinterpret_cast<const char*>(name.data()),end-name.begin()))
+            <<",\"entry\":"<<json(hex32(u32(events,i*24+12)))<<'}';
+    }
+    report << ']';
     report << ",\"functions\":[";
     first = true;
     for (const auto& [address, unit] : units) {
@@ -571,6 +716,19 @@ Batch recompile_batch(Xbe& image, std::span<const std::uint32_t> seeds,
                << ",\"budget_exhausted\":" << (unit.truncated ? "true" : "false")
                << ",\"unresolved_control_flow\":" << (unit.unresolved ? "true" : "false") << ",\"calls\":";
         addresses(report, unit.calls);
+        report << ",\"call_edges\":[";
+        for(std::size_t i=0;i<unit.call_edges.size();++i) {
+            if(i) report<<',';
+            report<<"{\"site\":"<<json(hex32(unit.call_edges[i].first))<<",\"target\":"<<json(hex32(unit.call_edges[i].second))<<'}';
+        }
+        report << "],\"timing_entry\":" << json(unit.timing_entry) << ",\"timing_sites\":";
+        instruction_reports(report,unit.timing_sites);
+        report << ",\"persistent_updates\":";
+        instruction_reports(report,unit.persistent_updates);
+        report << ",\"scene_calls\":";
+        addresses(report,unit.scene_calls);
+        report << ",\"scene_updates\":";
+        addresses(report,unit.scene_updates);
         report << ",\"unresolved_indirect_sites\":";
         addresses(report,unit.indirect);
         report << ",\"diagnostic_only_indirect_sites\":";
