@@ -8,11 +8,9 @@
   <em>From the creator of the <a href="https://github.com/timftw21/burnout2-recompilation">Burnout 2 recompilation</a>.</em>
 </p>
 
-An unofficial native version of the original Xbox game for Windows, built around accurate gameplay, the original presentation, and higher refresh rates.
+An unofficial native version of the original Xbox game for Windows, built around accurate gameplay, original presentation, and enhancements. This fan project is independent of SEGA. You must provide your own US Xbox game disc image. Original game files are not distributed here.
 
 **0.3.0 is the latest public development release.** Bugs, slowdowns, and stops in untested game modes are still possible. Linux and macOS are planned targets; the current game build requires Windows x64.
-
-This fan project is independent of SEGA. You must provide your own US Xbox game disc image. Original game files are not distributed here.
 
 ## AI disclosure
 
