@@ -114,7 +114,8 @@ std::vector<std::byte> payload(const std::filesystem::path& root,Json name,std::
 }
 }
 std::string replay_frame(const std::filesystem::path& capture,const std::filesystem::path& output,
-                         std::string_view sha,std::uint32_t through,std::uint32_t only,bool join_arrays,unsigned antialiasing,unsigned anisotropy) {
+                         std::string_view sha,std::uint32_t through,std::uint32_t only,bool join_arrays,unsigned antialiasing,unsigned anisotropy,unsigned unlimited_render_distance) {
+    if(unlimited_render_distance!=UINT32_MAX && unlimited_render_distance>1) throw std::runtime_error("Unlimited render distance must be 0 or 1");
     const auto started=std::chrono::steady_clock::now();
     const auto original=load_image(capture/"frame.png");
     unsigned scale=1;
@@ -140,8 +141,10 @@ std::string replay_frame(const std::filesystem::path& capture,const std::filesys
             if(record.at("format").string()!="smbd-gpu-frame-v1" || record.at("source_sha256").string()!=sha)
                 throw std::runtime_error("Frame capture does not match the verified executable");
             const auto aa=record.at("antialiasing",true),af=record.at("anisotropy",true);
+            const auto distance=record.at("unlimited_render_distance",true);
             renderer.enhancements(antialiasing==UINT32_MAX?(aa.text.empty()?0:aa.number()):antialiasing,
-                anisotropy==UINT32_MAX?(af.text.empty()?0:af.number()):anisotropy);
+                anisotropy==UINT32_MAX?(af.text.empty()?0:af.number()):anisotropy,
+                unlimited_render_distance==UINT32_MAX?distance.text=="true":unlimited_render_distance!=0);
             verified=true;
         } else if(type=="release") retired.insert(record.at("resource").number());
         else if(type=="surface") {
@@ -268,8 +271,8 @@ std::string replay_frame(const std::filesystem::path& capture,const std::filesys
     save_png(actual,output/"frame.png");save_png(difference,output/"difference.png");
     const auto errors=renderer.errors();std::string messages;
     for(const auto& message:errors) {if(!messages.empty()) messages+=',';messages+=json(message);}
-    const auto result=std::format("{{\"format\":\"smbd-frame-replay-v1\",\"source_sha256\":{},\"adapter\":{},\"passed\":{},\"draws\":{},\"captured_draws_selected\":{},\"join_arrays\":{},\"antialiasing\":{},\"anisotropy\":{},\"pixels_changed_from_capture\":{},\"replay_ms\":{},\"errors\":[{}]}}",
-        json(sha),json(renderer.adapter()),errors.empty(),draws,selected,join_arrays,renderer.stats().antialiasing,renderer.stats().anisotropy,changed,std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count(),messages);
+    const auto result=std::format("{{\"format\":\"smbd-frame-replay-v1\",\"source_sha256\":{},\"adapter\":{},\"passed\":{},\"draws\":{},\"captured_draws_selected\":{},\"join_arrays\":{},\"antialiasing\":{},\"anisotropy\":{},\"unlimited_render_distance\":{},\"pixels_changed_from_capture\":{},\"replay_ms\":{},\"errors\":[{}]}}",
+        json(sha),json(renderer.adapter()),errors.empty(),draws,selected,join_arrays,renderer.stats().antialiasing,renderer.stats().anisotropy,renderer.stats().unlimited_render_distance,changed,std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count(),messages);
     write_text(output/"report.json",result+'\n',false);return result;
 }
 }

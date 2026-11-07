@@ -85,6 +85,16 @@ struct VertexAttribute {
 };
 using VertexLayout=std::array<VertexAttribute,16>;
 struct VertexStream { Bytes bytes;std::uint32_t stride; };
+struct StreamDraw {
+    const RenderState& state;
+    const VertexConstants& constants;
+    const ProgramView& view;
+    std::span<const VertexStream> streams;
+    const ProgramVertex& current;
+    std::uint32_t layout,count;
+    std::span<const std::uint32_t> indices;
+    std::uint64_t pipeline=0;
+};
 
 struct RenderStats {
     std::uint64_t draws = 0, vertices = 0, shader_compilations = 0, vertex_bytes = 0;
@@ -94,6 +104,7 @@ struct RenderStats {
     std::uint32_t texture_slots=0;
     std::uint32_t resolution_scale=1;
     std::uint32_t antialiasing=0,anisotropy=0;
+    bool unlimited_render_distance=false;
     std::uint64_t total_vertex_bytes=0,texture_uploads=0,texture_upload_bytes=0,target_creations=0,target_copies=0;
     std::uint64_t buffer_maps=0,state_misses=0,layout_misses=0,sampler_misses=0,program_creations=0;
 };
@@ -123,8 +134,8 @@ public:
     void copy_to_main();
     void resize(std::uint32_t width, std::uint32_t height);
     void aspect_ratio(float);
-    void image_quality(unsigned resolution_scale,unsigned antialiasing,unsigned anisotropy);
-    void enhancements(unsigned antialiasing,unsigned anisotropy); // AA: off, FXAA low/medium/high, MSAA 2/4/8x. AF: original or 1/2/4/8/16x.
+    void image_quality(unsigned resolution_scale,unsigned antialiasing,unsigned anisotropy,bool unlimited_render_distance=false);
+    void enhancements(unsigned antialiasing,unsigned anisotropy,bool unlimited_render_distance=false); // AA: off, FXAA low/medium/high, MSAA 2/4/8x. AF: original or 1/2/4/8/16x.
     bool supports_msaa(unsigned samples) const;
     void attach_window(void* native_window);
     void publish_frame(); // Retain one complete source image, independent of subsequent guest draws.
@@ -137,7 +148,7 @@ public:
     void performance_frame(std::uint64_t next_frame);
     void finish_performance();
     void performance_resources();
-    void prepare(const RenderState&); // Cached D3D11 states; shaders are built ahead of time.
+    std::uint64_t prepare(const RenderState&); // Cached D3D11 states; shaders are built ahead of time.
     std::uint32_t prepare_program(const VertexProgram&, bool launch = false);
     std::uint32_t prepare_fixed(const FixedTransform& = {});
     std::uint32_t prepare_layout(std::uint32_t program,const VertexLayout&);
@@ -153,6 +164,7 @@ public:
     void draw_streams(const RenderState&,std::uint32_t layout,const VertexConstants&,const ProgramView&,
                       std::span<const VertexStream>,const ProgramVertex& current,std::uint32_t count,
                       std::span<const std::uint32_t> indices={});
+    void draw_streams(std::span<const StreamDraw>);
     void end();
     Image readback(); // Explicit diagnostic operation; never implicit in draw/present.
     Image read_target(std::uint32_t target);

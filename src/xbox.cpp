@@ -281,7 +281,7 @@ struct Xbox::State {
     bool sampling_goals=false;
     FrameClock::Time timing_started{},timing_finished{};
     std::uint64_t simulation_steps=0,timing_epochs=0;
-    std::uint32_t timing_mode=UINT32_MAX,timing_scene=UINT32_MAX;
+    std::uint32_t timing_mode=UINT32_MAX,timing_scene=UINT32_MAX,frame_loop=0;
 
     State(Xbe& image,Memory& memory,std::span<std::byte> ram,const std::filesystem::path& disc_path,XboxHost host):image(image),memory(memory),ram(ram),host(std::move(host)) {
         if(ram.size()!=64*1024*1024 || !image.supported()) throw std::runtime_error("Native Xbox requires the verified image and 64 MiB RAM");
@@ -716,6 +716,7 @@ struct Xbox::State {
         auto& cpu=thread->cpu;
         cpu.kernel=&services; cpu.clock=&clock; cpu.diagnostic=live?nullptr:&diagnostic;
         cpu.ultrawide=host.ultrawide;
+        cpu.unlimited_render_distance=host.unlimited_render_distance;
         cpu.preempt=[](Cpu& cpu) {
             auto& host=*static_cast<State*>(cpu.kernel->context);
             if(host.host.performance) host.host.performance->guest_sample(cpu.eip,host.current->id);
@@ -1004,12 +1005,12 @@ struct Xbox::State {
         const auto rate=host.refresh_rate?host.refresh_rate():60U;
         return rate?std::max(60U,rate):0;
     }
-    void begin_frame() {
+    void begin_frame(std::uint32_t loop) {
         const auto now=FrameClock::Clock::now();
         const auto mode=memory.load<std::uint32_t>(0x6C9364);
         const auto scene=memory.load<std::uint16_t>(0x6C9288);
-        const bool reset=!in_frame_loop || mode!=timing_mode || scene!=timing_scene;
-        in_frame_loop=true;frame_thread=current;
+        const bool reset=!in_frame_loop || mode!=timing_mode || scene!=timing_scene || loop!=frame_loop;
+        in_frame_loop=true;frame_thread=current;frame_loop=loop;
         if(reset) {frame_debt=logic_fraction=0;source_clock={};++timing_epochs;stage_expected=UINT32_MAX;stage_groups=0;goal_crossings={};reset_frame_history();}
         const auto rate=render_rate();
         double delta=1;
@@ -1149,7 +1150,9 @@ struct Xbox::State {
         frame_thread=current;
         if(!in_frame_loop && (mode!=timing_mode || scene!=timing_scene)) {source_clock={};++timing_epochs;}
         if(!in_frame_loop) {timing_mode=mode;timing_scene=scene;}
-        const bool main_frame=in_frame_loop && memory.load<std::uint32_t>(cpu.registers[esp])==0x66E7D;
+        // Baseball waits directly at the end of its private loop.
+        const auto frame_return=frame_loop==0x233DE8U?0x233E49U:0x66E7DU;
+        const bool main_frame=in_frame_loop && memory.load<std::uint32_t>(cpu.registers[esp])==frame_return;
         const bool movie=movie_sync();
         // Start playback with a fresh epoch, excluding time spent prebuffering.
         if(movie!=movie_pacing) {source_clock={};movie_pacing=movie;++timing_epochs;}
@@ -3144,6 +3147,10 @@ void Xbox::aspect_ratio(unsigned mode) {
     }
 }
 void Xbox::performance_recording(bool enabled) {if(state_->audio) state_->audio->recording(enabled);}
+void Xbox::unlimited_render_distance(bool enabled) {
+    state_->host.unlimited_render_distance=enabled;
+    for(auto& thread:state_->threads) thread->cpu.unlimited_render_distance=enabled;
+}
 void Xbox::output_gain(float gain) {state_->output_gain=gain;if(state_->audio) state_->audio->output_gain(state_->host.mute_audio?0:gain);}
 PerfCounters Xbox::performance_counters() const {
     PerfCounters counters{};const auto& s=*state_;
@@ -3193,8 +3200,8 @@ void Xbox::capture_frame(const std::filesystem::path& directory) {
         }
         constexpr std::array<std::uint32_t,2> end{};virtual_file.write(reinterpret_cast<const char*>(end.data()),sizeof(end));virtual_file.close();
         std::ostringstream output;
-        output<<std::format("{{\"format\":\"smbd-game-state-v1\",\"phase\":\"capture_request\",\"source_sha256\":{},\"frame\":{},\"active_thread\":{},\"gpu_cursor\":{},\"memory\":{{\"base\":0,\"size\":{},\"data\":\"guest-memory.bin\"}},\"recent_io_enabled\":{},\"audio_muted\":{},\"threads\":[",
-            json(s.image.sha256),s.gpu->stats().flips,s.current?s.current->id:0,json(hex32(s.gpu_cursor)),s.ram.size(),s.host.trace_io,s.host.mute_audio);
+        output<<std::format("{{\"format\":\"smbd-game-state-v1\",\"phase\":\"capture_request\",\"source_sha256\":{},\"frame\":{},\"active_thread\":{},\"gpu_cursor\":{},\"memory\":{{\"base\":0,\"size\":{},\"data\":\"guest-memory.bin\"}},\"recent_io_enabled\":{},\"audio_muted\":{},\"unlimited_render_distance\":{},\"threads\":[",
+            json(s.image.sha256),s.gpu->stats().flips,s.current?s.current->id:0,json(hex32(s.gpu_cursor)),s.ram.size(),s.host.trace_io,s.host.mute_audio,s.host.unlimited_render_distance);
         bool first=true;
         for(const auto& thread:s.threads) {
             if(!first) output<<',';first=false;const auto& cpu=thread->cpu;
@@ -3249,12 +3256,12 @@ void native_frame_wait(Cpu& cpu,Memory& memory) {
     if(&host.memory!=&memory) throw NativeBoundary(cpu.eip,"game frame clock received another guest memory");
     HostFloatingScope floating(cpu.floating);host.wait_frame(cpu);
 }
-void native_frame_begin(Cpu& cpu,Memory& memory) {
+void native_frame_begin(Cpu& cpu,Memory& memory,std::uint32_t loop) {
     if(!cpu.kernel || !cpu.kernel->context || cpu.kernel->entries[255]!=Xbox::State::dispatch_kernel<255>)
         throw NativeBoundary(cpu.eip,"game frame clock requires the Xbox host provider");
     auto& host=*static_cast<Xbox::State*>(cpu.kernel->context);
     if(&host.memory!=&memory) throw NativeBoundary(cpu.eip,"game frame clock received another guest memory");
-    HostFloatingScope floating(cpu.floating);host.begin_frame();
+    HostFloatingScope floating(cpu.floating);host.begin_frame(loop);
 }
 void native_stage_time(Cpu& cpu,Memory& memory) {
     if(!cpu.kernel || !cpu.kernel->context || cpu.kernel->entries[255]!=Xbox::State::dispatch_kernel<255>)

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 4.2)
-project(smbd VERSION 0.3.0 LANGUAGES C CXX)
+project(smbd VERSION 0.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

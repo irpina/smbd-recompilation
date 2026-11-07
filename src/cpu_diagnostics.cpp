@@ -114,7 +114,9 @@ std::string probe_cpu(Xbe& image,const std::filesystem::path& capture,const std:
                 else if(name=="flags") cpu.flags=value;
                 else if(name=="fs_base") cpu.fs_base=value;
                 else if(name=="gs_base") cpu.gs_base=value;
+                else if(name=="mxcsr" && !(value&~0xFFFFU)) cpu.floating.mxcsr=value;
                 else if(name=="ultrawide" && value<=1) cpu.ultrawide=value!=0;
+                else if(name=="unlimited_render_distance" && value<=1) cpu.unlimited_render_distance=value!=0;
                 else throw std::runtime_error("Unknown CPU probe register");
             } else if(command=="xmm") {
                 const auto index=next();if(index>=8) throw std::runtime_error("Invalid CPU probe XMM index");
@@ -210,6 +212,16 @@ std::string check_cpu(Xbe& image) {
         try { execute(); results << ",\"passed\":true}"; }
         catch (const std::exception& error) { ++failures; results << ",\"passed\":false,\"reason\":" << json(error.what()) << '}'; }
     };
+    check("arithmetic parity across byte values and operand widths",0,[&] {
+        for(unsigned low=0;low<256;++low) {
+            const auto expected=(std::popcount(low)&1)?0U:parity;
+            for(const auto high:{0U,0x12345600U,0xFFFFFF00U}) {
+                const auto value=high|low;
+                require((szp<8>(value)&parity)==expected && (szp<16>(value)&parity)==expected &&
+                        (szp<32>(value)&parity)==expected,"Arithmetic parity changed");
+            }
+        }
+    });
     for (const std::string_view text : {"", "Super Monkey Ball Deluxe", "123456789"}) {
         check("original lstrlenA", 0x00308BDE, [&] {
             std::memcpy(memory.access(data, text.size() + 1), text.data(), text.size() + 1);
@@ -569,6 +581,13 @@ std::string check_cpu(Xbe& image) {
         require(ranges.load<std::uint32_t>(0x103C)==0x12345678,"RAM aliases no longer share their bytes");
         ranges.store<std::uint64_t>(0xFFFFFFF8,0x123456789ABCDEF0ULL);
         require(ranges.load<std::uint64_t>(0xFFFFFFF8)==0x123456789ABCDEF0ULL,"Top-of-address-space access failed");
+        Memory top(0xFFFFFFF0,high);
+        require(top.access(UINT32_MAX,1)==high.data()+15 &&
+                !top.try_access(0,0) && !top.try_access(0,1) && !top.try_access(UINT32_MAX,2) &&
+                !top.try_access(UINT32_MAX,SIZE_MAX),"Primary RAM wrapped at the address-space boundary");
+        Memory empty(0x1000,std::span(bytes).first(0));
+        require(empty.access(0x1000,0)==bytes.data() && !empty.try_access(0xFFF,0),
+                "Empty primary RAM endpoints changed");
         const auto rejected=[&](std::uint32_t address,std::size_t size) {
             bool failed=false;
             try {(void)ranges.access(address,size);} catch(const std::runtime_error& error) {
@@ -581,6 +600,19 @@ std::string check_cpu(Xbe& image) {
         rejected(0x1000,SIZE_MAX);rejected(0x20000000,0);
         ranges.map(0x20000000,high);
         require(ranges.access(0x20000000,16)==high.data(),"Lookup retained a stale missing mapping");
+        std::array<std::byte,0x3000> pages{};
+        ranges.map(0x90000003,pages);
+        require(ranges.access(0x90001000,0x1000)==pages.data()+0xFFD &&
+                ranges.access(0x90000FFF,2)==pages.data()+0xFFC &&
+                ranges.access(0x90002FFF,4)==pages.data()+0x2FFC,
+                "Static page index changed partial-page or cross-page accesses");
+        rejected(0x90000002,1);rejected(0x90003002,2);rejected(0x90003003,1);
+        require(ranges.try_access(0x90003003,1)==nullptr,"Static page index exposed unmapped bytes");
+        // A dynamic unmap in the same table must leave static aliases intact.
+        ranges.map_dynamic(0x90004000,std::span(pages).first(0x1000));
+        ranges.unmap_dynamic(0x90000000,0x5000);
+        require(ranges.access(0x90001000,4)==pages.data()+0xFFD &&
+                ranges.try_access(0x90004000,4)==nullptr,"Dynamic unmap changed a static page");
     });
     return "{\"format\":\"smbd-cpu-check-v1\",\"passed\":" + std::string(failures ? "false" : "true") +
         ",\"sha256\":" + json(image.sha256) + ",\"compiled_functions\":" + std::to_string(compiled_batch.size()) +

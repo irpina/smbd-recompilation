@@ -1,0 +1,58 @@
+# Monkey Bowling > Special Mode > 1 player > AIAI > level 1 > Night-Sky Rocket Lane.
+# Barriers read original game state and send ordinary SDL controller input.
+0 none
+240 start
+252 none
+300 start
+312 none
+360 start
+372 none
+420 start
+432 none
+480 start
+492 none
+540 start
+552 none
+wait32 006C9354 FFFFFFFF 00000020 a
+0 none
+24 none
+wait32 008B2680 000000FF 00000000 b
+0 none
+24 none
+wait32 008B23D0 000000FF 00000001 right
+0 none
+24 none
+wait32 008B2680 000000FF 00000001 a
+0 none
+24 none
+wait32 008B23D1 000000FF 00000004 right
+0 none
+24 none
+wait32 008B2680 000000FF 00000030 a
+0 none
+24 none
+wait32 008B2400 000000FF 00000001 right
+0 none
+24 none
+wait32 008B2680 000000FF 00000004 a
+0 none
+24 none
+wait32 008B23D4 000000FF 00000000 left
+0 none
+24 none
+wait32 008B2680 000000FF 00000005 a
+0 none
+24 none
+wait32 008B2438 000000FF 00000000 left
+0 none
+24 a
+36 none
+wait32 008B2680 000000FF 00000032 a
+0 none
+24 none
+wait32 008B2402 000000FF 00000001 right
+0 none
+24 none
+wait32 006C9354 FFFFFFFF 000000AC a
+0 none
+120 none

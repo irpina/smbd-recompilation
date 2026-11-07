@@ -34,6 +34,15 @@ std::string type(unsigned bits) {
     return std::format("std::uint{}_t", bits);
 }
 
+struct CheckedRange {
+    ZydisDecodedOperand origin;
+    unsigned bytes;
+    bool shares_address(const ZydisDecodedOperand& operand) const {
+        return origin.mem.base==operand.mem.base && origin.mem.index==operand.mem.index &&
+            origin.mem.scale==operand.mem.scale;
+    }
+};
+
 class Emitter {
 public:
     std::set<unsigned> used, dirty;
@@ -47,6 +56,8 @@ public:
     std::set<std::uint32_t> loop_headers;
     std::map<std::string,std::string> native_helpers;
     std::map<std::string,std::string> native_declarations;
+    std::vector<CheckedRange> checked_ranges;
+    std::array<bool,8> checked_xmm_inputs{},checked_xmm_writes{};
     std::ostringstream body;
     void legacy_scope() {
         body << "    struct FrameDeltaRestore { float previous; ~FrameDeltaRestore() { smbd::frame_step.delta=previous; } } frame_delta_restore{smbd::frame_step.delta};\n"
@@ -133,18 +144,38 @@ public:
             throw std::runtime_error("Expected an Xbox XMM register");
         return value-ZYDIS_REGISTER_XMM0;
     }
+    std::string checked_pointer(const ZydisDecodedOperand& operand,unsigned width) {
+        const auto range=std::ranges::find_if(checked_ranges,[&](const auto& candidate) {return candidate.shares_address(operand);});
+        const auto offset=operand.mem.disp.has_displacement?operand.mem.disp.value:0;
+        if(range==checked_ranges.end() || offset<0 || offset+width>range->bytes)
+            throw std::runtime_error("SIMD access leaves its checked range");
+        return std::format("checked_{}+{}U",range-checked_ranges.begin(),offset);
+    }
     std::string vector(const ZydisDecodedOperand& operand, bool scalar = false) {
-        if (operand.type == ZYDIS_OPERAND_TYPE_REGISTER)
-            return "smbd::xmm(cpu.floating,"+std::to_string(xmm_register(operand.reg.value))+')';
+        if (operand.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+            const auto index=xmm_register(operand.reg.value);
+            if(checked_ranges.empty()) return "smbd::xmm(cpu.floating,"+std::to_string(index)+')';
+            if(!checked_xmm_writes[index]) checked_xmm_inputs[index]=true;
+            return "checked_xmm_"+std::to_string(index);
+        }
         if (operand.type != ZYDIS_OPERAND_TYPE_MEMORY) throw std::runtime_error("Expected SIMD register or memory");
+        if(!checked_ranges.empty())
+            return std::string(scalar?"smbd::load_scalar_vector(":"smbd::load_vector(")+checked_pointer(operand,scalar?4:16)+')';
         if (scalar) return "smbd::scalar_vector(memory.load<std::uint32_t>("+address(operand)+"))";
         return "smbd::load_vector(memory,"+address(operand)+')';
     }
     void vector_write(const ZydisDecodedOperand& operand, const std::string& value, bool scalar = false) {
-        if (operand.type == ZYDIS_OPERAND_TYPE_REGISTER)
-            body << "    smbd::set_xmm(cpu.floating," << xmm_register(operand.reg.value) << ',' << value << ");\n";
-        else if (operand.type == ZYDIS_OPERAND_TYPE_MEMORY)
-            body << "    smbd::store_vector(memory," << address(operand) << ',' << value << ',' << (scalar?"true":"false") << ");\n";
+        if (operand.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+            const auto index=xmm_register(operand.reg.value);
+            if(checked_ranges.empty()) body << "    smbd::set_xmm(cpu.floating," << index << ',' << value << ");\n";
+            else {
+                checked_xmm_writes[index]=true;
+                body << "    checked_xmm_" << index << " = " << value << ";\n";
+            }
+        } else if (operand.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+            const auto target=checked_ranges.empty()?"memory,"+address(operand):checked_pointer(operand,scalar?4:16);
+            body << "    smbd::store_vector(" << target << ',' << value << ',' << (scalar?"true":"false") << ");\n";
+        }
         else throw std::runtime_error("Unsupported SIMD destination");
     }
     void mmx(const Instruction& instruction) {
@@ -207,9 +238,17 @@ public:
     void scalar_compare(const Instruction& instruction) {
         const auto& operands = instruction.operands;
         const auto left = "cpu.floating.xmm[" + std::to_string(xmm_register(operands[0].reg.value)) + "].data()";
-        const auto right = operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER ?
+        auto right = operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER ?
             "cpu.floating.xmm[" + std::to_string(xmm_register(operands[1].reg.value)) + "].data()" :
             "memory.access(" + address(operands[1]) + ",4)";
+        if(instruction.address==0x88F58) {
+            if(hex_bytes(Bytes(instruction.bytes).first(instruction.decoded.length))!="0F2F15C87B3400")
+                throw std::runtime_error("Original character upright snap threshold differs");
+            native_declarations["frame_rotation_snap"]="float frame_rotation_snap(FloatingState&,Memory&,float);\n";
+            used.insert(6);
+            body << "    const float frame_snap=frame_rotation_snap(cpu.floating,memory,smbd::frame_step.delta);\n";
+            right="&frame_snap";
+        }
         const std::string mnemonic = ZydisMnemonicGetString(instruction.decoded.mnemonic);
         const auto helper = "smbd_" + mnemonic;
         native_helpers[helper] = helper + " PROC\n    movss xmm0,dword ptr [rcx]\n    " +
@@ -266,13 +305,6 @@ public:
             if (!memory->size || memory->size%8) throw std::runtime_error("Unsupported x87 memory width");
             body << "    const auto fp_address=" << address(*memory) << ";\n"
                  << "    auto* fp_memory=memory.access(fp_address," << memory->size/8 << ");\n";
-            if(instruction.address==0xB3E19 || instruction.address==0xB3E21) {
-                const auto expected=instruction.address==0xB3E19?"DD05D8244000":"DD05D0244000";
-                if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!=expected) throw std::runtime_error("Original camera response signature differs");
-                native_declarations["frame_gain_double"]="double frame_gain_double(FloatingState&,double);\n";
-                body << "    const double response=frame_gain_double(cpu.floating,std::bit_cast<double>(memory.load<std::uint64_t>(fp_address)));\n"
-                        "    fp_memory=const_cast<double*>(&response);\n";
-            }
             constexpr std::uint32_t blend_snap_limits[]={0x9541D,0x954B7,0x956B4,0x9574D,0x9CB1C,0x9CBA3,0x9CD94,0x9CE1B};
             if(std::ranges::find(blend_snap_limits,instruction.address)!=std::end(blend_snap_limits)) {
                 if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="D905847B3400")
@@ -309,7 +341,7 @@ public:
         if (mnemonic=="fnsave" || mnemonic=="fninit")
             body << "    cpu.floating.instruction=cpu.floating.data=0;\n    cpu.floating.opcode=cpu.floating.code_selector=cpu.floating.data_selector=0;\n";
     }
-    void instruction(const Instruction& instruction) {
+    void instruction(const Instruction& instruction,std::string_view prologue={},bool ordered_sse=false) {
         const auto& ins = instruction.decoded;
         const auto& operands = instruction.operands;
         const auto next = instruction.address + ins.length;
@@ -326,9 +358,51 @@ public:
             ((string_compare || string_scan || string_move || string_fill) &&
              (ins.attributes & (ZYDIS_ATTRIB_HAS_SEGMENT_FS | ZYDIS_ATTRIB_HAS_SEGMENT_GS))))
             throw std::runtime_error("Instruction prefixes need an implementation");
-        body << label(instruction.address) << ": { // " << instruction.text << '\n';
+        if(checked_ranges.empty()) body << label(instruction.address) << ": ";
+        body << "{ // " << instruction.text << '\n' << prologue;
         if(loop_headers.contains(instruction.address))
             body << "    if(smbd::checkpoint_due(cpu)) { commit(); smbd::checkpoint(cpu," << constant(instruction.address) << "); }\n";
+        if(instruction.address==0xB785F) {
+            if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="F605142189000A")
+                throw std::runtime_error("Original dynamic FOV entry differs");
+            native_declarations["frame_camera_fov_begin"]="void frame_camera_fov_begin(Memory&,std::uint32_t);\n";
+            body << "    frame_camera_fov_begin(memory," << read_reg(ZYDIS_REGISTER_ESI) << "-0xC4U);\n";
+        }
+        if(instruction.address==0x65C46 || instruction.address==0x66B25) {
+            const bool portal_view=instruction.address==0x65C46;
+            if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!=(portal_view?"0F87A0000000":"764D"))
+                throw std::runtime_error("Original portal projected-size cutoff differs");
+            // Keep the portal view and its blue surface at a distance. The
+            // frustum checks and the separate close-up fade still apply.
+            body << "    if(cpu.unlimited_render_distance) goto " << label(portal_view?next:0x66B74) << ";\n";
+        }
+        if(instruction.address==0x668BA) {
+            if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="A120D56D00")
+                throw std::runtime_error("Original teleport overlay history copy differs");
+            // The overlay blends the previous image before copying the result
+            // back into its history. Keep that feedback on the rule clock.
+            // A new effect still needs its first image before it can draw.
+            body << "    if(!smbd::frame_step.logic && memory.load<std::uint32_t>(" << read_reg(ZYDIS_REGISTER_EBP)
+                << "+0x108U)) goto " << label(0x6696F) << ";\n";
+        }
+        if(instruction.address==0x1A4C54) {
+            if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="66891560937E00")
+                throw std::runtime_error("Original bowling HUD rotation differs");
+            used.insert(1);used.insert(2);dirty.insert(2);
+            body << "    if(smbd::frame_step.delta!=1) {\n"
+                    "        const auto before=static_cast<std::int32_t>(static_cast<std::int16_t>(ecx));\n"
+                    "        edx=before+smbd::frame_integer_increment(static_cast<std::int32_t>(edx)-before);\n    }\n";
+        }
+        if(instruction.address==0xAE13D || instruction.address==0xAE150 ||
+           instruction.address==0xAE208 || instruction.address==0xAE251) {
+            const auto expected=instruction.address==0xAE13D?"0F8431010000":
+                instruction.address==0xAE150?"F30F101520BD3600":instruction.address==0xAE208?"55":"8B86F8000000";
+            if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!=expected)
+                throw std::runtime_error("Original camera shake boundary differs");
+            if(instruction.address==0xAE13D) body << "    if(!frame_shake_step) goto " << label(next) << ";\n";
+            else body << "    if(!" << (instruction.address==0xAE208?"frame_shake_draw":"frame_shake_step")
+                << ") goto " << label(instruction.address==0xAE150?0xAE208:0xAE274) << ";\n";
+        }
         if(instruction.address==0x313B0) {
             if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="A174EF6D00")
                 throw std::runtime_error("Original immediate primitive completion differs");
@@ -384,16 +458,33 @@ public:
                 "    memory.store<std::uint32_t>(esp,x);memory.store<std::uint32_t>(esp+8,right-x);\n";
             body << "    _mm_setcsr(status); }\n";
         }
+        if(instruction.address==0x594FA) {
+            used.insert(4);
+            // The deferred icon's widescreen matrix scales about a signed
+            // integer pivot. Keep its center at the projected floating X.
+            body << "    if(memory.load<std::uint8_t>(0x6C934CU) &&\n"
+                    "       (!memory.load<std::uint8_t>(0x891E8CU) || memory.load<std::uint32_t>(0x71B30CU))) {\n"
+                    "        const auto sprite=memory.load<std::uint32_t>(esp);\n"
+                    "        const auto x=std::bit_cast<float>(memory.load<std::uint32_t>(sprite+4));\n"
+                    "        const auto pivot=static_cast<std::int16_t>(memory.load<std::uint16_t>(sprite+0x40));\n"
+                    "        const auto center=pivot+(x-pivot)*(cpu.ultrawide?7.0f/4:4.0f/3);\n"
+                    "        memory.store<std::uint32_t>(sprite+4,std::bit_cast<std::uint32_t>(center));\n"
+                    "    }\n";
+        }
         if(instruction.address==0x7550A && (ins.mnemonic!=ZYDIS_MNEMONIC_CALL || ins.length!=5 || instruction.target()!=0x74E70U))
             throw std::runtime_error("Original sprite anchor ABI differs");
-        if(instruction.address==0x14F00) {
-            if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="6A04") throw std::runtime_error("Original frame entry signature differs");
-            calls=restores=true;native_declarations["frame_begin"]="void native_frame_begin(Cpu&,Memory&);\n";
-            body << "    commit(); native_frame_begin(cpu,memory); restore();\n";
+        if(instruction.address==0x14F00 || instruction.address==0x1E1287 || instruction.address==0x233DE8) {
+            const auto signature=instruction.address==0x14F00?"6A04":instruction.address==0x1E1287?"E8A4FDE4FF":"E843D2DFFF";
+            if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!=signature) throw std::runtime_error("Original frame entry signature differs");
+            calls=restores=true;native_declarations["frame_begin"]="void native_frame_begin(Cpu&,Memory&,std::uint32_t);\n";
+            body << "    commit(); native_frame_begin(cpu,memory," << constant(instruction.address) << "); restore();\n";
         }
         constexpr std::pair<std::uint32_t,std::uint32_t> rule_calls[]={{0x14F30,0xEBD40},{0x14F4D,0x23F590},{0x14F52,0x23ECC0},
             {0x14F6A,0x23FB50},{0x14F82,0x16E30},{0x14F9A,0x15A90},{0x14FB2,0x1ADA0},{0x150B5,0x23EEC0},
-            {0x79652,0x775E0}};
+            {0x79652,0x775E0},
+            {0x1E129F,0xEBD40},{0x1E12A4,0x23F590},{0x1E12A9,0x23ECC0},{0x1E12AE,0x1EF4D0},
+            {0x1E12B3,0x1EB370},{0x1E12B8,0x16E30},{0x1E1355,0x1EDD80},{0x1E1385,0x23EEC0},{0x1E139A,0xFB4D0},
+            {0x233DFE,0xEBD40},{0x233E03,0x23F590},{0x233E08,0x23ECC0},{0x233E1C,0x232BF0},{0x233E35,0x23EEC0}};
         for(const auto& [site,target]:rule_calls) if(instruction.address==site) {
             if(ins.mnemonic!=ZYDIS_MNEMONIC_CALL || ins.length!=5 || instruction.target()!=target)
                 throw std::runtime_error("Original rule-tick call signature differs");
@@ -402,7 +493,11 @@ public:
                 body << "    if(!smbd::frame_step.logic) { commit(); native_menu_layout(cpu,memory,0,false); restore(); goto " << label(next) << "; }\n";
                 body << "    struct PresentationScope { bool previous; ~PresentationScope() { smbd::frame_step.capture_presentation=previous; } } presentation_scope{smbd::frame_step.capture_presentation};\n"
                         "    smbd::frame_step.capture_presentation=true;\n";
-            } else body << "    if(!smbd::frame_step.logic) goto " << label(next) << ";\n";
+            } else {
+                // Tennis's rule section also owns pause transitions and counters
+                // between calls. Resume at the shared scene update on draw frames.
+                body << "    if(!smbd::frame_step.logic) goto " << label(site==0x1E129F?0x1E135A:next) << ";\n";
+            }
             legacy_scope();
         }
         for(const auto& layout:frame_presentations) if(layout.prologue_end) {
@@ -447,7 +542,13 @@ public:
         }
         // These counters measure game time; all following flag consumers are
         // independent TESTs or loop arithmetic, not the omitted INC/DEC flags.
-        constexpr std::pair<std::uint32_t,std::string_view> tick_counters[]={{0x15110,"41"},{0x1511B,"FF05D0926C00"},
+        if(instruction.address==0x586B4) {
+            if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="48") throw std::runtime_error("Original minimap state dispatch differs");
+            // Opening, closing and integer border rotation retain their
+            // rule steps. The center below follows the ball on each scene.
+            body << "    if(!smbd::frame_step.logic) goto " << label(0x58738) << ";\n";
+        }
+        constexpr std::pair<std::uint32_t,std::string_view> tick_counters[]={{0x58767,"6601153E374B00"},{0x1E1394,"FF05D0926C00"},{0x15110,"41"},{0x1511B,"FF05D0926C00"},
             {0x81243,"FF0580FF7200"},{0x8D8DD,"40"},{0x8D98D,"40"},{0x8D522,"40"},{0x8CCC7,"40"},{0x901BE,"40"},{0x8C71F,"48"},{0xBAEA4,"41"},{0xB3C32,"40"},{0x13791D,"48"},
             {0x7F569,"41"},{0x7F56C,"49"},{0x7F56F,"83C102"},{0x7F574,"83E902"},{0x76ECB,"49"},{0x2B8E16,"FF05BC288B00"},
             {0x2B77D9,"40"},{0x897A2,"41"},{0x897D8,"C7827C02000000000000"},{0xA80E2,"48"},{0x6BC95,"40"}};
@@ -519,6 +620,28 @@ public:
             // The mode controller must observe the ape's completion flag before
             // the ball consumes it. Physics below this event still runs each scene.
             body << "    if(!smbd::frame_step.logic) goto " << label(0x8D958) << ";\n";
+        }
+        if(instruction.address==0x1B12CE) {
+            if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="0F8508020000" || instruction.target()!=0x1B14DC)
+                throw std::runtime_error("Original bowling trail update/draw boundary differs");
+            // Append and age the 32 trail samples with the bowling rules. The
+            // original ribbon drawing below this boundary still runs each scene.
+            body << "    if(!smbd::frame_step.logic) goto " << label(0x1B14DC) << ";\n";
+        }
+        constexpr std::tuple<std::uint32_t,std::string_view,std::uint32_t> hud_rules[]={
+            {0x4D0BE,"FF04B5F8B66E00",0x4D0C5},{0x4D0DA,"0F8E98010000",0x4D278},
+            {0x4D2D8,"48",0x4D2D9},{0x4D31B,"48",0x4D31C},{0x4D35D,"40",0x4D35E},
+            {0x4D3B7,"A020B76E00",0x4D3EA},{0x4D438,"0FBFCA",0x4D46A},{0x4D448,"0FBFC2",0x4D46A}};
+        for(const auto& [site,bytes,resume]:hud_rules) if(instruction.address==site) {
+            if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!=bytes)
+                throw std::runtime_error("Original character HUD rule boundary differs");
+            body << "    if(!smbd::frame_step.logic) goto " << label(resume) << ";\n";
+        }
+        if(instruction.address==0x4D434) {
+            if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="2BD0") throw std::runtime_error("Original fallout HUD turn differs");
+            native_declarations["frame_hud_fall_turn"]="std::uint32_t frame_hud_fall_turn(FloatingState&,std::uint32_t,std::uint32_t);\n";
+            used.insert(0);used.insert(4);dirty.insert(0);floating=true;
+            body << "    eax=frame_hud_fall_turn(cpu.floating,memory.load<std::uint32_t>(memory.load<std::uint32_t>(esp+0x14U)),eax);\n";
         }
         constexpr std::tuple<std::uint32_t,std::string_view,std::uint32_t> blend_completion[]={{0x97E0C,"761D",0x97E2B},
             {0x9C5B5,"7622",0x9C5D9},{0x9AEE0,"7615",0x9AEF7}};
@@ -669,7 +792,7 @@ public:
             if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!=expected)
                 throw std::runtime_error("Original camera dispatch signature differs");
             body << "    const auto camera_update=" << read(operands[0]) << ";\n"
-                    "    const bool continuous_camera=camera_update==0xB3BA0U || camera_update==0xAFF40U || camera_update==0xB03F0U || camera_update==0xB0580U || camera_update==0xB0800U || camera_update==0xB0A50U;\n"
+                    "    const bool continuous_camera=camera_update==0xAFCA0U || camera_update==0xB3BA0U || camera_update==0xB00D0U || camera_update==0xAFF40U || camera_update==0xB03F0U || camera_update==0xB0580U || camera_update==0xB0800U || camera_update==0xB0A50U;\n"
                     "    if(!continuous_camera && !smbd::frame_step.logic) goto " << label(next) << ";\n"
                     "    struct FrameDeltaRestore { float previous; ~FrameDeltaRestore() { smbd::frame_step.delta=previous; } } frame_delta_restore{smbd::frame_step.delta};\n"
                     "    if(!continuous_camera) smbd::frame_step.delta=1;\n";
@@ -882,6 +1005,7 @@ public:
             floating=true;
             body << "    const auto control=" << read(operands[0]) << ";\n"
                 << "    if(control&~0xFFFFU) throw std::runtime_error(\"Guest MXCSR has reserved bits set\");\n"
+                << "    cpu.floating.mxcsr=control;\n"
                 << "    _mm_setcsr(control);\n";
             break;
         case ZYDIS_MNEMONIC_MOVQ: case ZYDIS_MNEMONIC_MOVNTQ: case ZYDIS_MNEMONIC_EMMS:
@@ -928,8 +1052,23 @@ public:
             const bool store=operands[0].type==ZYDIS_OPERAND_TYPE_MEMORY;
             const auto& memory_operand=operands[store?0:1];
             const auto& register_operand=operands[store?1:0];
+            const bool high=ins.mnemonic==ZYDIS_MNEMONIC_MOVHPS;
+            if(!checked_ranges.empty()) {
+                const auto value=vector(register_operand),mapped=checked_pointer(memory_operand,8);
+                if(store) {
+                    const auto source=high?"reinterpret_cast<const std::byte*>(&"+value+")+8":"&"+value;
+                    body << "    std::memcpy(" << mapped << ',' << source << ",8);\n";
+                }
+                else {
+                    const auto target=high?"reinterpret_cast<std::byte*>(&value)+8":"&value";
+                    body << "    auto value = " << value << ";\n"
+                         << "    std::memcpy(" << target << ',' << mapped << ",8);\n";
+                    vector_write(register_operand,"value");
+                }
+                break;
+            }
             const auto storage="cpu.floating.xmm["+std::to_string(xmm_register(register_operand.reg.value))+"].data()+"+
-                (ins.mnemonic==ZYDIS_MNEMONIC_MOVHPS?"2":"0");
+                (high?"2":"0");
             const auto mapped="memory.access("+address(memory_operand)+",8)";
             body << "    std::memcpy(" << (store?mapped:storage) << ',' << (store?storage:mapped) << ",8);\n";
             break;
@@ -937,7 +1076,7 @@ public:
         case ZYDIS_MNEMONIC_MOVAPS: case ZYDIS_MNEMONIC_MOVUPS: case ZYDIS_MNEMONIC_MOVSS: {
             floating=true;
             const bool scalar=ins.mnemonic==ZYDIS_MNEMONIC_MOVSS;
-            if (ins.mnemonic==ZYDIS_MNEMONIC_MOVAPS) for(unsigned i=0;i<2;++i)
+            if (ins.mnemonic==ZYDIS_MNEMONIC_MOVAPS && checked_ranges.empty()) for(unsigned i=0;i<2;++i)
                 if(operands[i].type==ZYDIS_OPERAND_TYPE_MEMORY)
                     body << "    if(" << address(operands[i]) << "&15U) throw std::runtime_error(\"Unaligned guest MOVAPS\");\n";
             auto value=vector(operands[1],scalar);
@@ -961,11 +1100,16 @@ public:
             constexpr std::pair<std::uint32_t,std::string_view> response_gains[]={{0xAFF5C,"F30F103534903700"},{0xB040C,"F30F103534903700"},
                 {0xB0660,"F30F103534903700"},{0xB06AF,"F30F101DB88D3700"},{0xB08C4,"F30F101DB88D3700"},
                 {0xB08E5,"F30F102D34903700"},{0xB0B04,"F30F101D4C923700"},{0xB0B43,"F30F102D34903700"},
-                {0x6BBB3,"F30F1015B87B3400"},{0x6BBF8,"F30F100D34903700"}};
+                {0x6BBB3,"F30F1015B87B3400"},{0x6BBF8,"F30F100D34903700"},{0x58865,"F30F1015B87B3400"}};
             for(const auto& [site,bytes]:response_gains) if(instruction.address==site) {
                 if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!=bytes) throw std::runtime_error("Original response gain differs");
                 native_declarations["frame_gain"]="__m128 frame_gain(FloatingState&,__m128);\n";
                 value="smbd::frame_gain(cpu.floating,"+value+')';
+            }
+            if(instruction.address==0x588D5 || instruction.address==0x588F4) {
+                const auto bytes=instruction.address==0x588D5?"F30F1015108E3700":"F30F100DC48D3700";
+                if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!=bytes) throw std::runtime_error("Original minimap fade step differs");
+                value="smbd::frame_increment("+value+')';
             }
             if(instruction.address==0xAFF50 || instruction.address==0xB0400) {
                 const auto bytes=instruction.address==0xAFF50?"F30F101D081A3A00":"F30F101D4C6F3900";
@@ -1015,7 +1159,29 @@ public:
             std::string value="_mm_"+name+'(';
             if (!unary) value+=vector(operands[0])+',';
             value+=vector(operands[1],scalar)+')';
+            if(instruction.address==0x3484A || instruction.address==0x34853) {
+                const auto expected=instruction.address==0x3484A?"F30F5ECA":"F30F5EE2";
+                if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!=expected)
+                    throw std::runtime_error("Original perspective depth calculation differs");
+                // The far->infinity limits of near*far/(far-near) and
+                // far/(far-near) are near and 1. Keep the original near
+                // plane, FOV and side culling without infinity/NaN arithmetic.
+                const auto depth=instruction.address==0x3484A?
+                    "smbd::scalar_vector(memory.load<std::uint32_t>("+read_reg(ZYDIS_REGISTER_ESP)+"+0x14U))":
+                    std::string("_mm_set_ss(1.0f)");
+                value="(cpu.unlimited_render_distance ? _mm_move_ss("+vector(operands[0])+','+depth+") : "+value+')';
+            }
+            if(instruction.address==0x66080) {
+                if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="F30F5EC1")
+                    throw std::runtime_error("Original teleport overlay placement differs");
+                // The original quad sits halfway to the camera's far plane.
+                // With infinite clipping, q+1 is zero. Use the camera's
+                // original far distance for placement, keeping its projection.
+                value="(cpu.unlimited_render_distance && _mm_cvtss_f32("+vector(operands[1],true)+")==0.0f ? _mm_move_ss("+
+                    vector(operands[0])+",smbd::scalar_vector(memory.load<std::uint32_t>(memory.load<std::uint32_t>(0x73F19CU)+0x44U))) : "+value+')';
+            }
             constexpr std::pair<std::uint32_t,std::string_view> time_adds[]={{0xBAEA7,"F30F58C1"},{0xBAECB,"F30F58D9"},{0xBAEF2,"F30F58D1"},
+                {0xB7799,"F30F5805C0713900"},{0xB77B3,"F30F5C05C0713900"},{0xB77DD,"F30F5805C0713900"},{0xB7817,"F30F5C05C0713900"},
                 {0x8CB22,"F30F5C05BC7B3400"},{0x7F67E,"F30F5C05BC7B3400"},
                 {0x8FE43,"F30F58442414"},{0x8FE53,"F30F58442418"},{0x8FE63,"F30F5844241C"},
                 {0x95436,"F30F5C0D847B3400"},{0x95440,"F30F580D847B3400"},{0x954D0,"F30F5C0D847B3400"},{0x954DA,"F30F580D847B3400"},
@@ -1039,6 +1205,15 @@ public:
                 if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="F30F590D58244000") throw std::runtime_error("Original fallout camera vertical damping differs");
                 native_declarations["frame_decay"]="__m128 frame_decay(FloatingState&,__m128);\n";
                 value="_mm_mul_ss("+vector(operands[0])+",smbd::frame_decay(cpu.floating,"+vector(operands[1],true)+"))";
+            }
+            if(instruction.address==0x27A8B7 || instruction.address==0x24980A) {
+                if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="F30F5CC1")
+                    throw std::runtime_error("Original recorded stage fractional sample differs");
+                used.insert(0);
+                // Integer-only source frames hid this forward-only assumption.
+                // Reconstruction supplies the recorded stop/direction/speed.
+                body << "    constexpr float speeds[]={1,0,-1,2,-2,0,0,0};\n";
+                value="_mm_sub_ss("+vector(operands[0])+",_mm_mul_ss("+vector(operands[1],true)+",_mm_set_ss(speeds[memory.load<std::uint32_t>(eax)&7U])))";
             }
             constexpr std::pair<std::uint32_t,std::string_view> item_motion[]={{0x258F8A,"F30F584620"},{0x258FD0,"F30F584624"},{0x258FE7,"F30F584628"}};
             for(const auto& [site,bytes]:item_motion) if(instruction.address==site) {
@@ -1086,15 +1261,31 @@ public:
                 }
                 value="_mm_mul_ss("+vector(operands[0])+",frame_gain_interval(cpu.floating,"+vector(operands[1],true)+','+interval+"))";
             }
-            if(instruction.address==0xB3E3C) {
-                if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="F30F5E05487F6C00") throw std::runtime_error("Original camera time interval signature differs");
-                value="smbd::frame_increment("+value+')';
-            }
             if (unary && scalar) value="_mm_move_ss("+vector(operands[0])+','+value+')';
+            if(ordered_sse) {
+                const auto left=vector(operands[0]),right=vector(operands[1],scalar);
+                if(value!="_mm_"+name+'('+left+','+right+')')
+                    throw std::runtime_error("Checked SIMD arithmetic has a custom lowering");
+                // Native intrinsics can commute add and multiply. Execute the
+                // x86 opcode in guest order to preserve NaN payload selection.
+                body << "#if (defined(__clang__) || defined(__GNUC__)) && (defined(__x86_64__) || defined(_M_X64))\n"
+                     << "    auto result = " << left << ";\n"
+                     << "    const auto source = " << right << ";\n"
+                     << "    __asm__ volatile(\"" << ZydisMnemonicGetString(ins.mnemonic)
+                     << " {%1,%0|%0,%1}\" : \"+x\"(result) : \"x\"(source));\n"
+                     << "#else\n    const auto result = " << value << ";\n#endif\n";
+                value="result";
+            }
             vector_write(operands[0],value); break;
         }
         case ZYDIS_MNEMONIC_MOV: case ZYDIS_MNEMONIC_MOVZX: {
             auto value=read(operands[1]);
+            if(instruction.address==0xB78A3) {
+                if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="66C7866CFFFFFF5555")
+                    throw std::runtime_error("Original dynamic FOV maximum differs");
+                native_declarations["frame_camera_fov_max"]="std::uint32_t frame_camera_fov_max(Memory&,std::uint32_t);\n";
+                value="frame_camera_fov_max(memory,"+read_reg(ZYDIS_REGISTER_ESI)+"-0xC4U)";
+            }
             if(instruction.address==0xA7D45 || instruction.address==0xA7D48) {
                 const bool second=instruction.address==0xA7D48;
                 if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!=(second?"66894602":"66890E"))
@@ -1130,14 +1321,29 @@ public:
                 body << "    frame_world_difference=value;\n";
             }
             type(operands[1].size); write(operands[0], "value"); break;
-        case ZYDIS_MNEMONIC_LEA:
-            body << "    const auto value = " << address(operands[1], true) << ";\n";
-            write(operands[0], "value"); break;
+        case ZYDIS_MNEMONIC_LEA: {
+            auto value=address(operands[1],true);
+            if(instruction.address==0xAE217) {
+                if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="8DAEFC000000")
+                    throw std::runtime_error("Original camera shake vector pointer differs");
+                value="(frame_shake_step?"+value+":frame_shake_sample)";
+            }
+            body << "    const auto value = " << value << ";\n";
+            write(operands[0],"value"); break;
+        }
         case ZYDIS_MNEMONIC_ADD: case ZYDIS_MNEMONIC_SUB: case ZYDIS_MNEMONIC_CMP:
         case ZYDIS_MNEMONIC_ADC: case ZYDIS_MNEMONIC_SBB:
         case ZYDIS_MNEMONIC_AND: case ZYDIS_MNEMONIC_OR: case ZYDIS_MNEMONIC_XOR: case ZYDIS_MNEMONIC_TEST: {
             auto left=read(operands[0]);
-            const auto increment=read(operands[1]);
+            auto increment=read(operands[1]);
+            constexpr std::pair<std::uint32_t,std::string_view> hud_turns[]={
+                {0x4D407,"81C280020000"},{0x4D40F,"81C200010000"},
+                {0x4D417,"81C280000000"},{0x4D464,"81C280010000"}};
+            for(const auto& [site,bytes]:hud_turns) if(instruction.address==site) {
+                if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!=bytes)
+                    throw std::runtime_error("Original character HUD spin differs");
+                increment="static_cast<std::uint32_t>(smbd::frame_integer_increment("+increment+"))";
+            }
             constexpr std::pair<std::uint32_t,std::string_view> item_angles[]={{0x258FB9,"6603D8"},{0x258FC4,"6603C1"},{0x258FF3,"6603CA"}};
             for(const auto& [site,bytes]:item_angles) if(instruction.address==site) {
                 if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!=bytes) throw std::runtime_error("Original item rotation differs");
@@ -1295,6 +1501,12 @@ public:
                 if(instruction.target()!=0x98B50) throw std::runtime_error("Original sampled pose call differs");
                 native_declarations["frame_sampled_pose"]="void guest_00098B50_sampled(Cpu&,Memory&,const std::uint32_t*);\n";
                 body << "guest_00098B50_sampled(cpu,memory,&frame_pose_time);\n";
+            } else if(instruction.address==0x8902F) {
+                if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="E8DC0EFAFF" || instruction.target()!=0x29F10)
+                    throw std::runtime_error("Original character upright quaternion call differs");
+                native_declarations["frame_upright_rotation"]="bool frame_upright_rotation(Cpu&,Memory&,float);\n";
+                used.insert(6);
+                body << "if(!frame_upright_rotation(cpu,memory,smbd::frame_step.delta)) guest_00029F10(cpu,memory);\n";
             } else if (instruction.kernel_ordinal) body << "smbd::call_kernel<" << *instruction.kernel_ordinal << ">(cpu,memory);\n";
             else if (instruction.target()) body << "guest_" << std::format("{:08X}", *instruction.target()) << "(cpu, memory);\n";
             else if(instruction.zero_guard) body << "throw smbd::NativeBoundary(target,\"callback was proved unreachable\");\n";
@@ -1375,6 +1587,14 @@ public:
                  << (ins.mnemonic == ZYDIS_MNEMONIC_SHL ? "left" : ins.mnemonic == ZYDIS_MNEMONIC_SHR ? "right" : "arithmetic_right")
                  << ");\n    flags = result.flags;\n";
             std::string value="result.value";
+            if(instruction.address==0xB7945) {
+                if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!="C1F805")
+                    throw std::runtime_error("Original dynamic FOV response differs");
+                native_declarations["frame_camera_fov_response"]="std::uint32_t frame_camera_fov_response(FloatingState&,Memory&,std::uint32_t,std::uint32_t,std::uint32_t);\n";
+                value="frame_camera_fov_response(cpu.floating,memory,"+read_reg(ZYDIS_REGISTER_ESI)+"-0xC4U,"+
+                    read(operands[0])+",result.value)";
+                floating=true;
+            }
             if(instruction.address==0xA7DE8 || instruction.address==0xA7E11 || instruction.address==0xA7EB6 || instruction.address==0xA7EE1) {
                 const bool second=instruction.address==0xA7E11 || instruction.address==0xA7EE1;
                 if(hex_bytes(Bytes(instruction.bytes).first(ins.length))!=(second?"66C1FA02":"66C1F902"))
@@ -1535,10 +1755,82 @@ public:
                 x87(instruction);
             } else throw std::runtime_error("Instruction has no native lowering yet");
         }
-        if (!terminator) body << "    goto " << label(next) << ";\n";
+        if (!terminator && checked_ranges.empty()) body << "    goto " << label(next) << ";\n";
         body << "}\n";
     }
 };
+
+// The measured loops repeatedly access fields of the same matrix or vertex
+// record. The ordinary lowering handles split or unmapped ranges and retains
+// every original branch target.
+std::string checked_simd_block(const Function& function,const Emitter& original,std::uint32_t start,std::uint32_t end) {
+    constexpr ZydisMnemonic allowed[]={ZYDIS_MNEMONIC_MOVSS,ZYDIS_MNEMONIC_ADDSS,ZYDIS_MNEMONIC_MULSS,
+        ZYDIS_MNEMONIC_MOVAPS,ZYDIS_MNEMONIC_MOVUPS,ZYDIS_MNEMONIC_MOVLPS,ZYDIS_MNEMONIC_MOVLHPS,
+        ZYDIS_MNEMONIC_SHUFPS,ZYDIS_MNEMONIC_MULPS,ZYDIS_MNEMONIC_ADDPS};
+    Emitter fast;
+    std::set<std::string> aligned_addresses;
+    const auto first=function.instructions.find(start),last=function.instructions.find(end);
+    if(first==function.instructions.end() || last==function.instructions.end() || start>=end)
+        throw std::runtime_error("Missing checked SIMD block boundary");
+    auto next=start;
+    for(auto at=first;at!=last;++at) {
+        const auto& [pc,instruction]=*at;
+        const auto& ins=instruction.decoded;
+        if(pc!=next || original.loop_headers.contains(pc) || std::ranges::find(allowed,ins.mnemonic)==std::end(allowed))
+            throw std::runtime_error("Unexpected instruction in checked SIMD block at "+hex32(pc));
+        next+=ins.length;
+        for(unsigned i=0;i<ins.operand_count_visible;++i) {
+            const auto& operand=instruction.operands[i];
+            if(operand.type==ZYDIS_OPERAND_TYPE_REGISTER) fast.xmm_register(operand.reg.value);
+            if(operand.type!=ZYDIS_OPERAND_TYPE_MEMORY) continue;
+            const auto offset=operand.mem.disp.has_displacement?operand.mem.disp.value:0;
+            if(operand.mem.type!=ZYDIS_MEMOP_TYPE_MEM || (operand.mem.segment!=ZYDIS_REGISTER_DS && operand.mem.segment!=ZYDIS_REGISTER_SS) ||
+                offset<0 || offset>64 || !operand.size || operand.size>128 || operand.size%8)
+                throw std::runtime_error("Unexpected operand in checked SIMD block at "+hex32(pc));
+            const auto bytes=static_cast<unsigned>(offset)+operand.size/8;
+            const auto range=std::ranges::find_if(fast.checked_ranges,[&](const auto& candidate){return candidate.shares_address(operand);});
+            if(range!=fast.checked_ranges.end()) range->bytes=std::max(range->bytes,bytes);
+            else {
+                auto origin=operand;
+                origin.mem.disp.has_displacement=false;
+                fast.checked_ranges.push_back({origin,bytes});
+            }
+            if(ins.mnemonic==ZYDIS_MNEMONIC_MOVAPS) {
+                auto aligned=operand;
+                aligned.mem.disp.has_displacement=offset%16!=0;
+                aligned.mem.disp.value=offset%16;
+                aligned_addresses.insert(fast.address(aligned));
+            }
+        }
+    }
+    if(next!=end || fast.checked_ranges.empty()) throw std::runtime_error("Incomplete checked SIMD block");
+    std::ostringstream out;
+    for(unsigned i=0;i<fast.checked_ranges.size();++i) {
+        const auto& range=fast.checked_ranges[i];
+        out << "    auto* checked_" << i << "=memory.try_access(" << fast.address(range.origin) << ',' << range.bytes << ");\n";
+    }
+    out << "    if(checked_0";
+    for(unsigned i=1;i<fast.checked_ranges.size();++i) out << " && checked_" << i;
+    for(const auto& address:aligned_addresses) out << " && (" << address << " &15U)==0";
+    // Keep intermediate registers local only when memory and SSE operations
+    // cannot fault. The ordinary path retains instruction-level state.
+    // Floating scopes and LDMXCSR track the control bits in guest state.
+    // Arithmetic changes sticky status flags, but never these exception masks.
+    out << " && (cpu.floating.mxcsr & 0x1F80U)==0x1F80U) {\n";
+    for(auto at=first;at!=last;++at) fast.instruction(at->second,{},true);
+    if(fast.calls || fast.returns || !fast.native_declarations.empty())
+        throw std::runtime_error("Checked SIMD block calls a runtime service");
+    for(unsigned i=0;i<fast.checked_xmm_inputs.size();++i) if(fast.checked_xmm_inputs[i] || fast.checked_xmm_writes[i]) {
+        out << "    __m128 checked_xmm_" << i;
+        if(fast.checked_xmm_inputs[i]) out << " = smbd::xmm(cpu.floating," << i << ')';
+        out << ";\n";
+    }
+    out << fast.body.view();
+    for(unsigned i=0;i<fast.checked_xmm_writes.size();++i) if(fast.checked_xmm_writes[i])
+        out << "    smbd::set_xmm(cpu.floating," << i << ",checked_xmm_" << i << ");\n";
+    out << "    goto " << label(end) << ";\n    }\n";
+    return out.str();
+}
 }
 
 LoweredFunction lower(const Function& function) {
@@ -1607,10 +1899,19 @@ LoweredFunction lower(const Function& function) {
         if(edge.to && (edge.kind=="jump" || edge.kind=="conditional" || edge.kind=="table-jump") && *edge.to<=edge.from)
             emitter.loop_headers.insert(*edge.to);
     emitter.calls=!emitter.loop_headers.empty();
+    constexpr std::uint32_t checked_blocks[][3]={{0x21BE0,0x21C35,0x21D54},
+        {0x21BE0,0x21D7A,0x21E94},{0x2F4A0,0x2F557,0x2F584}};
     for (const auto& [pc, instruction] : function.instructions) {
         try {
             const auto begin=emitter.body.view().size();
-            emitter.instruction(instruction);
+            std::string prologue;
+            bool ordered_sse=false;
+            for(const auto& [entry,start,end]:checked_blocks)
+                if(function.entry==entry && pc>=start && pc<end) {
+                    ordered_sse=true;
+                    if(pc==start) prologue=checked_simd_block(function,emitter,start,end);
+                }
+            emitter.instruction(instruction,prologue,ordered_sse);
             const auto code=emitter.body.view().substr(begin);
             if(code.contains("frame_") || code.contains("native_stage_") || code.contains("native_menu_layout"))
                 result.timing_sites.emplace_back(pc,code);
@@ -1630,6 +1931,9 @@ LoweredFunction lower(const Function& function) {
     if(function.entry==0x13C80) out << "void native_sample_goals(Cpu&,Memory&);\n";
     if(function.entry==0xA8000) out << "void frame_reset_world();\n";
     if(function.entry==0xA7820) out << "void frame_reset_world(std::uint32_t);\n";
+    if(function.entry==0xB7350) out << "void frame_reset_camera();\n";
+    if(function.entry==0xADFC0) out << "void frame_reset_camera(std::uint32_t);\n";
+    if(function.entry==0xADE60) out << "void frame_reset_camera_shake(std::uint32_t);\n";
     if(function.entry==0x27C220) {
         if(hex_bytes(Bytes(function.instructions.at(function.entry).bytes).first(5))!="A014218900")
             throw std::runtime_error("Original replay recorder entry differs");
@@ -1637,17 +1941,39 @@ LoweredFunction lower(const Function& function) {
     }
     const bool pose_sampler=function.entry==0x98B50;
     const bool text_update=function.entry==0x6BB60,text_draw=function.entry==0x6B520;
+    const bool camera_update=function.entry==0xB3BA0 || function.entry==0xB00D0;
+    const bool camera_shake=function.entry==0xAE130;
+    const char* ranking_camera=function.entry==0x264DF0?"frame_ranking_camera_step":function.entry==0xB74C0?"frame_ranking_camera_view":nullptr;
     if(text_update) out << "void frame_text_box_update(Cpu&,Memory&,void (*)(Cpu&,Memory&,bool,bool));\n";
     if(text_draw) out << "void frame_text_box_draw(Cpu&,Memory&,void (*)(Cpu&,Memory&));\n";
+    if(camera_update) out << "void frame_camera_update(Cpu&,Memory&,void (*)(Cpu&,Memory&),bool);\n";
+    if(camera_shake) out << "void frame_camera_shake_update(Cpu&,Memory&,void (*)(Cpu&,Memory&,bool,bool,std::uint32_t));\n";
+    if(ranking_camera) out << "void " << ranking_camera << "(Cpu&,Memory&,void (*)(Cpu&,Memory&));\n";
     out << "void guest_" << std::format("{:08X}", function.entry);
     if(pose_sampler) out << "_sampled";
-    if(text_update || text_draw) out << "_source";
+    if(text_update || text_draw || camera_update || camera_shake || ranking_camera) out << "_source";
     out << "(Cpu& cpu, [[maybe_unused]] Memory& memory";
     if(pose_sampler) out << ", const std::uint32_t* frame_sampled_pose";
     if(text_update) out << ", bool frame_text_style, bool frame_text_placement";
+    if(camera_shake) out << ", bool frame_shake_step, bool frame_shake_draw, std::uint32_t frame_shake_sample";
     out << ") {\n";
     out << "    if(smbd::checkpoint_due(cpu)) smbd::checkpoint(cpu," << constant(function.entry) << ");\n";
     const auto entry_begin=out.view().size();
+    if(function.entry==0xB7350) {
+        if(hex_bytes(Bytes(function.instructions.at(function.entry).bytes).first(8))!="F30F1005347C3400")
+            throw std::runtime_error("Original camera array initializer differs");
+        out << "    frame_reset_camera();\n";
+    }
+    if(function.entry==0xADFC0) {
+        if(hex_bytes(Bytes(function.instructions.at(function.entry).bytes).first(6))!="81EC8C020000")
+            throw std::runtime_error("Original camera record initializer differs");
+        out << "    frame_reset_camera(memory.load<std::uint32_t>(cpu.registers[smbd::esp]+4));\n";
+    }
+    if(function.entry==0xADE60) {
+        if(hex_bytes(Bytes(function.instructions.at(function.entry).bytes).first(4))!="8B442404")
+            throw std::runtime_error("Original camera shake reset differs");
+        out << "    frame_reset_camera_shake(0x73F1A0U+memory.load<std::uint32_t>(cpu.registers[smbd::esp]+4)*0x28CU);\n";
+    }
     if(function.entry==0x2A13B0) out << "    smbd::trace_ui_draw(cpu,memory);\n";
     if(function.entry==0x2A13B0 && hex_bytes(Bytes(function.instructions.at(0x2A13B7).bytes).first(6))!="81ECA4000000")
         throw std::runtime_error("Original menu local frame differs");
@@ -1677,7 +2003,7 @@ LoweredFunction lower(const Function& function) {
     if(function.entry==0x13C80) out << "    native_sample_goals(cpu,memory);\n";
     // Legacy rule/controller services have no render submissions of their own.
     // Their registered drawing callbacks remain in the per-render-frame path.
-    constexpr std::uint32_t legacy_updates[]={0x27C220,0x260CF0,0x13C80,0x11F60,0x23F8D0,0xF8F90,0x67F00,0x58690,0x994B0,0xEA950,0x610E0,0x72350,
+    constexpr std::uint32_t legacy_updates[]={0x27C220,0x260CF0,0x13C80,0x11F60,0x23F8D0,0xF8F90,0x67F00,0x994B0,0xEA950,0x610E0,0x72350,
         0x4DB90,0x8B9D0,0x8B5B0,0x9ABE0,
         0x8BD80,0x115B80,0x127270,0x1A6350,0x1A5070,0x22CC50};
     if(std::ranges::find(legacy_updates,function.entry)!=std::end(legacy_updates)) {
@@ -1750,6 +2076,25 @@ LoweredFunction lower(const Function& function) {
     if(text_draw) {
         result.timing_entry="    frame_text_box_draw(cpu,memory,guest_0006B520_source);\n";
         out << "void guest_0006B520(Cpu& cpu,Memory& memory) {\n" << result.timing_entry << "}\n";
+    }
+    if(camera_update) {
+        const auto guest="guest_"+std::format("{:08X}",function.entry);
+        if(function.entry==0xB00D0 && hex_bytes(Bytes(function.instructions.at(function.entry).bytes).first(5))!="A014218900")
+            throw std::runtime_error("Original goal camera entry differs");
+        result.timing_entry="    frame_camera_update(cpu,memory,"+guest+"_source,"+(function.entry==0xB00D0?"true":"false")+");\n";
+        out << "void " << guest << "(Cpu& cpu,Memory& memory) {\n" << result.timing_entry << "}\n";
+    }
+    if(camera_shake) {
+        result.timing_entry="    frame_camera_shake_update(cpu,memory,guest_000AE130_source);\n";
+        out << "void guest_000AE130(Cpu& cpu,Memory& memory) {\n" << result.timing_entry << "}\n";
+    }
+    if(ranking_camera) {
+        const auto& first=function.instructions.at(function.entry);
+        if(hex_bytes(Bytes(first.bytes).first(first.decoded.length))!=(function.entry==0x264DF0?"6A03":"83EC24"))
+            throw std::runtime_error("Original ranking camera entry differs");
+        const auto guest="guest_"+std::format("{:08X}",function.entry);
+        result.timing_entry=std::format("    {}(cpu,memory,{}_source);\n",ranking_camera,guest);
+        out << "void " << guest << "(Cpu& cpu,Memory& memory) {\n" << result.timing_entry << "}\n";
     }
     result.source = out.str();
     result.floating=emitter.floating;

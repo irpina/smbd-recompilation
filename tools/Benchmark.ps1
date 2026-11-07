@@ -4,21 +4,30 @@ param(
     [string]$Storage = (Join-Path $PSScriptRoot '..\data\user'),
     [string]$Executable = (Join-Path $PSScriptRoot '..\build\windows\Release\smbd.exe'),
     [string]$Output,
-    [ValidateSet('ProSkaters','Composition')][string]$Scene = 'ProSkaters'
+    [ValidateSet('NightSkyRocketLane','ProSkaters','Composition')][string]$Scene = 'NightSkyRocketLane'
 )
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$benchmarkScene = if($Scene -eq 'Composition') {
-    @{slug='composition';title='Practice / AIAI / Story World 2 / 3 Composition';world=1;stage=2}
-} else {
-    @{slug='pro-skaters';title='Practice / AIAI / Story World 4 / 1 PRO SKATERS';world=3;stage=0}
+$benchmarkScene = switch($Scene) {
+    'NightSkyRocketLane' {
+        @{slug='night-sky-rocket-lane';title='Monkey Bowling / Special Mode / AIAI / Night-Sky Rocket Lane'
+          input='night_sky_rocket_lane_input.txt';required=@{mode=172;character=0;bowling_mode=2;bowling_variant=0;bowling_stage=1;stage_id=159}}
+    }
+    'Composition' {
+        @{slug='composition';title='Practice / AIAI / Story World 2 / 3 Composition'
+          input='composition_input.txt';required=@{mode=51;ball_state=32;character=0;practice_category=1;practice_world=1;practice_stage=2}}
+    }
+    'ProSkaters' {
+        @{slug='pro-skaters';title='Practice / AIAI / Story World 4 / 1 PRO SKATERS'
+          input='pro_skaters_input.txt';required=@{mode=51;ball_state=32;character=0;practice_category=1;practice_world=3;practice_stage=0}}
+    }
 }
 if(!$Output) { $Output=Join-Path $root ('build\checks\' + $benchmarkScene.slug + '-' + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
 $Storage = (Resolve-Path -LiteralPath $Storage).Path
 $Executable = (Resolve-Path -LiteralPath $Executable).Path
 $Output = [IO.Path]::GetFullPath($Output)
 if (Test-Path -LiteralPath $Output) { throw 'Use a new benchmark output directory.' }
-$inputPath = Join-Path $root $(if($Scene -eq 'Composition') {'knowledge\composition_input.txt'} else {'knowledge\pro_skaters_input.txt'})
+$inputPath = Join-Path $root ('knowledge\' + $benchmarkScene.input)
 $settings = @(Get-Content -LiteralPath (Join-Path $root 'data\local\settings.cfg') |
     Where-Object { $_ -notmatch '^(aspect|vsync|fullscreen|resolution|refresh_rate|antialiasing|anisotropy|muted|show_fps)=' })
 $settings += @('aspect=1','vsync=0','fullscreen=0','resolution=1','refresh_rate=360','antialiasing=0','anisotropy=0','muted=1','show_fps=0')
@@ -52,9 +61,10 @@ try {
         if (!$runResult.controller_complete -or !$window.complete -or $window.last_tick - $window.first_tick -ne $Seconds * 60 -or
             $window.mode_changes -ne 0 -or $window.ball_state_changes -ne 0) { throw "Run $run left the benchmark window." }
         foreach ($state in @($window.start, $window.end)) {
-            if ($state.mode -ne 51 -or $state.ball_state -ne 32 -or $state.character -ne 0 -or
-                $state.practice_category -ne 1 -or $state.practice_world -ne $benchmarkScene.world -or $state.practice_stage -ne $benchmarkScene.stage) {
-                throw "Run $run did not remain in $($benchmarkScene.title)."
+            foreach($field in $benchmarkScene.required.GetEnumerator()) {
+                if($null -eq $state.($field.Key) -or $state.($field.Key) -ne $field.Value) {
+                    throw "Run $run did not remain in $($benchmarkScene.title): $($field.Key) was $($state.($field.Key))."
+                }
             }
         }
         $summary = (Get-Content -LiteralPath (Join-Path $performancePath 'performance.json') -Raw | ConvertFrom-Json).summary
@@ -69,7 +79,8 @@ try {
         }
     }
     [pscustomobject]@{
-        format='smbd-practice-benchmark-v1'; scene=$benchmarkScene.title; target_hz=360
+        format=$(if($Scene -eq 'NightSkyRocketLane'){'smbd-scene-benchmark-v1'}else{'smbd-practice-benchmark-v1'})
+        scene=$benchmarkScene.title; target_hz=360
         budget_ms=1000.0 / 360; warmup_ticks=120; measurement_ticks=$Seconds * 60
         resolution_scale=1; widescreen=$true; vsync=$false; refresh_rate=360; antialiasing=0; anisotropy=0; target_sha256=$summary.target_sha256
         executable_sha256=(Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash

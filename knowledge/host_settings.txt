@@ -461,3 +461,94 @@ Native checks pass:31 clock scheduling assertions, including alternating
 three workers,10632 native functions, zero unresolved sites. Only existing
 diagnostics were extended; scratch recipes remain ignored build artifacts.
 No computer use or user save/settings modifications were involved.
+
+Optional unlimited render distance (2026-11-06)
+--------------------------------------------
+Target SHA-256: 9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2.
+Enhancements / Render distance override persists as
+unlimited_render_distance=0/1 and defaults to the original finite distance.
+It updates existing guest threads at the completed-frame boundary and is
+inherited by new threads; Restore defaults also restores the original limit.
+
+Camera initializer ADFC0 stores near=0.1 at camera+40 (AE0A9) and far=20000
+at camera+44 (AE0BD, constant 402430 = 469C4000). Main view setters B4CA0
+and B4F20 pass these through AF110 to perspective builder 347A0. Other
+perspective views share 347A0. The ordinary sphere cullers A2260/A22E0/A2360
+test four side planes and, for transformed spheres, the camera-facing plane;
+they do not impose the camera's far limit.
+
+347A0 computes near*far/(far-near) at 3484A (F30F5ECA) and far/(far-near)
+at 34853 (F30F5EE2). The opt-in AOT expressions use their exact far->infinity
+limits: near and 1. Original stores then produce depth coefficients -1 and
+-near. No large guessed distance, infinity arithmetic, executable-file edits
+or per-frame camera-memory patching is needed. Near clipping, FOV, aspect,
+side culling, orthographic UI projections and game timing remain original.
+Both original instruction signatures are verified during generation.
+Capture state records the active option, and probe-cpu can select it with
+reg unlimited_render_distance 0/1 for offline inspection.
+
+Validation: single-worker game/tool release builds pass, with 10632 native
+functions and zero unresolved sites. Nine native projection calls cover three
+near/far pairs, each off/on/off. Disabled and restored matrices match the
+pre-change binary bit for bit; enabling changes only the two depth terms,
+keeps every output finite and retains near clipping. Points at twice each
+original far distance are clipped originally and visible with the option.
+Evidence: build/checks/render-distance/projection-validation.json.
+Existing CPU/input/audio checks pass (23/58/37 cases); presentation passes
+432 checks including seven live graphics changes, with audio output muted.
+The hidden muted SIMPLE runs finish at identical position [0,2.75,14] and
+stage timer 456 with the option off and on. The seven-page settings capture
+shows the checkbox fully visible in Enhancements. All diagnostic settings,
+storage copies, recipes, reports and images remain under that ignored folder.
+
+Texture LOD follow-up (2026-11-06, same verified executable)
+--------------------------------------------------------
+The user's frame-1793991501112-114650043900 has the option enabled, but the
+original implementation changed only the projection. The reported tree detail
+change is texture sharpening when approaching, not a different tree model.
+The capture uses background 19 (bg_jun2), game mode B0, and ordinary mipmapped
+samplers: filter 02062000 / control 4003FFC0 permits distance-selected lower
+texture levels independently of the camera's far plane. Changing projection
+therefore cannot preserve the distant leaf texture detail.
+
+The same option now clamps native sampler MinLOD and MaxLOD to zero, keeping
+the original full-resolution texture level. Changing it invalidates prepared
+sampler pipelines through the existing image-quality path. Turning it off
+restores the original filtering and mip range; AA and anisotropic settings
+remain independent. The tooltip explains the texture detail and shimmer tradeoff.
+GPU capture headers retain the active renderer option, and replay-frame accepts
+--unlimited-render-distance 0/1 while defaulting to the recorded value. Older
+captures without that header field preserve their original mipmapped rendering.
+
+Both release builds pass with one worker. Supplied-capture replays retain all
+362 draws/resources, with zero D3D11 errors: original and restored modes each
+have zero changed pixels; full detail changes 174195 pixels, including visibly
+sharper distant leaves. Evidence: build/checks/tree-lod/{original,full-detail,
+restored}/frame.png and report.json. The original capture is untouched.
+Presentation passes 451 checks, including 1x/4x off/on/off GPU pixel checks with
+distinct base/lower mip colours and seven live graphics changes. A separate
+120-frame hidden muted launch verifies the saved option reaches the renderer;
+its new capture automatically replays with the option enabled and zero pixel
+differences. Diagnostic outputs and storage remain in build/checks/tree-lod.
+
+WORMHOLE teleporter follow-up (2026-11-06, same verified executable)
+-----------------------------------------------------------------
+The portal view at 65AF0 rejects a projected radius below 0.045; 66A00
+separately fades the blue surface between 0.045 and 0.055. The override
+bypasses those size limits at 65C46 and 66B25. Sphere and side culling and
+the close-up fade at 81EC0 still run. With the supplied capture's view
+pushed back, the view and blue draw are reached only with the override.
+
+The screen effect at 65E20 places its quad halfway to the original far
+plane. The override made the divisor at 66080 zero, and a live capture
+contained infinite vertices. The quad now uses the active camera's saved
+far distance when the projection has no far plane. The feedback copy at
+668BA now advances on the same rule ticks as the timer at 66980; a new
+effect can still take its first image, and drawing continues every scene.
+
+In the 360 FPS cap baseline, 45 effect ticks took 252 history copies.
+The 60 FPS cap retains 45 copies; the second teleport at the 360 FPS cap
+recorded the expected 44 remaining copies after priming. Its live capture
+shows the effect with the override on and finite vertices. Isolating its
+draw in replay changes 306173 of 307200 pixels, versus zero before the
+projection fix. Evidence: build/checks/teleporters/report.json.

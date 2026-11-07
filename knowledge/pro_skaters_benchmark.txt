@@ -3,9 +3,9 @@ PRO SKATERS performance benchmark, 2026-10-31
 Target executable SHA256:
 9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2
 
-The default benchmark is now Practice > AIAI > Story World 4 > 1 PRO SKATERS.
-Run tools/Benchmark.ps1. -Scene Composition retains the historical benchmark.
-Both routes use native 1x (640x480 internal) widescreen, VSync off, 360 Hz selected, AA off and
+The PRO SKATERS workflow selects Practice > AIAI > Story World 4 > 1 PRO SKATERS.
+Run tools/Benchmark.ps1 -Scene ProSkaters. -Scene Composition retains the historical benchmark.
+Both practice routes use native 1x (640x480 internal) widescreen, VSync off, 360 Hz selected, AA off and
 original texture filtering. Each of three runs has 120 original ticks of warmup
 and 1200 measured ticks (20 seconds), with isolated copies of the source save.
 The 360 Hz target is 2.778 ms per fresh scene. Normal rules remain at 60 Hz.
@@ -133,3 +133,536 @@ Final executable SHA256:
 Main artifacts: baseline/, profile/, wait-analysis/, wait/, barrier/, final/,
 final-comparison.json, composition-control/, final-*.json, final-frame-replay/,
 pgo-generate-build.log, pgo-use-build.log, final-tool-build.log and verified-build.log.
+
+Release 0.3.0 performance continuation, 2026-11-04
+
+The same World 4 route and frozen save ran three 20-second windows per build
+on Windows x64, Ryzen 5 5600X / GeForce RTX 5060 Ti. Each window stayed in
+Practice mode with AIAI on PRO SKATERS for all 1200 original ticks. The runs
+used native 1x widescreen, 360 Hz selected, VSync off, AA off and original
+filtering. Build and link used three workers with the existing CPU profile.
+Clang discarded profile counts for functions whose control flow had changed.
+
+The 0.3.0 baseline spent 49.5% of 10,322 native main-thread samples in
+Memory::mapped_pointer. The hottest instructions walked the address tree
+introduced when ordinary virtual allocations moved out of the physical pool
+to fix false memory exhaustion in Baseball. A sparse page index now handles
+accesses within one committed page. Accesses spanning pages still check the
+original contiguous host ranges. Decommit updates both indexes.
+
+The out-of-line page lookup reduced the median of run medians from 11.9910
+to 7.0423 ms. Its native profile attributed 14.4% of samples to mapped_pointer.
+Inlining the page lookup removed the call on ordinary pageable accesses.
+The renderer also avoids sending identical bindings within a draw batch
+and reuses completed inline vertex payloads and the caller's shader constants.
+With only the binding change applied after the page index, median draw
+submission time per draw fell from about 602 to 554 ns. On top of inlining,
+removing the copies reduced graphics commands, submission and buffer upload
+time per draw from 2369 to 2285 ns across the middle runs. The latter build
+processed more draws per scene, with a higher median frame time and lower p99
+than the build before the copy changes.
+
+Frame times are median / p99 in milliseconds.
+  Run 1 measured 6.4125 / 7.3007 source and 1.888000 / 2.394912 GPU, with a
+  313.83 MiB peak working set.
+  Run 2 measured 5.5239 / 6.7335 source and 1.656960 / 2.228512 GPU, with a
+  315.08 MiB peak working set.
+  Run 3 measured 5.9015 / 6.7209 source and 1.927136 / 2.277440 GPU, with a
+  313.70 MiB peak working set.
+The median of run medians fell 50.8% from the fresh 0.3.0 baseline, while the
+median p99 fell from 16.3127 to 6.7335 ms. The game still exceeds the 2.778 ms
+budget. Guest code remained the largest cost at 3.43..3.99 ms per scene.
+The route averages 875..1013 draws per scene on this build. The benchmark
+fixes the stage and elapsed rule time, so the exact render workload can vary.
+The full route took 48.95..48.99 seconds, including startup, menu navigation,
+warmup and recording. A separate traced run reached the first game frame in
+916.77 ms from process startup.
+
+The final native profile collected 6,932 samples over ten seconds. The
+largest individual routine was the translated skinning loop at 00021BE0
+(10.1%), followed by Gpu::submit (7.2%). The remaining out-of-line memory
+lookup accounted for 2.3%. See build/checks/perf-030-final-profile/.
+
+All 196 service checks passed, including decommit and recommit of pageable
+memory. CPU, input, audio, texture, image copy, bump mapping and presentation
+checks passed. The timing audit passed all 429 probes. A new live World 4
+capture replayed 950 draws with zero changed pixels and zero D3D11 errors.
+The 360 Hz live timing route retained 183 original ticks from goal to replay.
+All game runs were hidden and muted and used isolated saves.
+
+Comparison and per-run reports are under build/checks/perf-030-comparison.json,
+perf-030-baseline/, perf-030-page-index/, perf-030-render-bindings/,
+perf-030-inline-pages/ and perf-030-graphics-copies/. Validation reports are in
+perf-030-final-validation/. The measured final executable SHA256 is
+376F0EF30B6591CAB43B7B616779FDD057AAE3C0978DD48A612F45187E914228.
+
+Checked ranges for vertex transforms, 2026-11-04
+
+The recompiler now checks each matrix or vertex record once in three
+straight-line blocks of 00021BE0 and 0002F4A0. It derives access widths
+and offsets from the verified instructions. Each fast block uses the
+same SSE lowering as the ordinary path. The ordinary path still handles
+records split across separate mappings and retains the original
+per-instruction errors and loop checkpoints.
+
+CPU probes matched the previous build on single and multiple skinning
+influences, overlapping source and destination records, the generated
+inline vertex packet and records split across separate pageable mappings.
+Both builds reported the same four-byte access fault at 04002000 in the
+unmapped-page probe and retained the same guest checkpoint address.
+The fixed 1,200-call skinning probe matched output bytes and took a median
+215.00 ms before and 160.95 ms after, including probe setup. All four
+before/after pairs are recorded in build/checks/perf-030-simd-probes/.
+
+Six alternating 20-second PRO SKATERS runs used the same frozen save and
+graphics settings. The median of run medians fell from 6.27 to 5.55 ms.
+The median p99 fell from 7.23 to 6.49 ms. Translated code fell from a
+middle 3.79 to 3.07 ms per frame. The exact draw counts still varied across
+runs. See build/checks/perf-030-simd-comparison/comparison.json.
+
+Sharing current vertex attributes
+
+All 950 draws in the previous World 4 capture used the same current vertex
+attributes and one streamed vertex buffer. The renderer now uploads the
+current attributes to a separate zero-stride buffer when the bytes change.
+The varying vertices bind only their used stream slots. Median submission
+time per draw fell from 535 to 449 ns after the SIMD change, and buffer
+upload time per draw fell from 571 to 546 ns.
+
+The three World 4 runs measured 4.4471 / 5.4222, 4.9618 / 6.2219 and
+4.5047 / 6.4998 ms median / p99. GPU medians ranged from 1.629 to 1.700 ms
+and GPU p99s ranged from 1.948 to 2.481 ms. Peak working set was 315.44 MiB.
+The route took 48.95..48.97 seconds from process launch through the reports.
+The traced run reached its first game frame in 916.83 ms.
+The middle CPU phases cost 2.72 ms in guest code, 1.03 ms processing GPU
+commands, 0.38 ms submitting draws and 0.46 ms uploading buffers.
+Draw counts varied from about 806 to 907 per frame. The 2.778 ms frame
+budget remains open.
+
+The 950-draw reference and a new 1,047-draw World 4 capture replayed with
+zero changed pixels and no D3D11 errors. Builds and links used three workers.
+The live timing route again took 183 original ticks from goal to replay.
+The final 6,913-sample profile puts Gpu::submit first at 8.68% of samples.
+The skinning routine now accounts for 4.17%. A bounded disassembly and
+the native sample table are in build/checks/perf-030-current-vertex-profile/.
+Measurements are under build/checks/perf-030-current-vertex/ and validation
+is under build/checks/perf-030-current-vertex-validation/. The game executable
+SHA256 is 1D9D6D158A1953A7B8C3E235A534D13BE939D50C435A456B59E217019473D3AA.
+
+Batching graphics register writes
+
+A packet histogram for one 901-draw World 4 frame counted 18,138 packets
+and 218,162 words. The register-only ranges in gpu.cpp covered 11,571
+packets and 31,568 words. Those packets now update the register image in
+one operation. Pending draw ranges still finish before the state changes.
+Packets crossing into side effects take the ordinary path. Queue bounds
+are checked at the commands that grow them, and unchanged shader rows
+retain the existing program storage.
+
+The packet diagnostic compares bulk register writes with scalar writes,
+including repeated registers, RAM aliases and the boundary before primitive
+begin or constant upload. All 20 texture and packet cases passed. The
+1,047-draw reference replay matched every pixel with no D3D11 errors.
+
+Three alternating 20-second windows per build measured a middle
+60.35 to 47.42 ns of GPU command CPU time per packet. The unfiltered
+frame medians and p99s varied with scene workload. An analysis of the same
+windows matched 6,139 frames per build across 49 workload groups with equal
+logic ticks and bins of 16 draws, 2,048 vertices and 256 packets. The matched
+groups averaged about 909 draws, 91,150 vertices and 18,883 packets per
+frame. Their median command time fell from 1.170 to 0.926 ms. Matched frame
+median/p99 fell from 5.3813 / 7.3166 to 5.0493 / 6.5874 ms.
+
+Packet counts are in build/checks/perf-030-command-histogram/packet-counts.json.
+The comparison and matched subsets are in build/checks/perf-030-command-comparison/.
+The packet-build executable SHA256 is
+3C7C98464EC8657C4B1AD6BCA22915A74906146081E97EBA610E6B417BA3A7FF.
+
+CPU profile refresh experiment
+
+World 4 PRO SKATERS and World 2 COMPOSITION each completed one instrumented
+20-second training window. The merged profile contains 18,536 functions.
+It rebuilt without profile hash mismatches, and the instrumented frame
+times were excluded from the comparison.
+
+The same packet build ran six alternating World 4 windows with the two
+profiles. The middle p99 was 5.84 ms with the previous profile and 6.08 ms
+with the refresh. Among 9,174 matched frames per build, the median guest
+phase improved from 3.0285 to 2.9676 ms, while total frame p99 rose from
+5.989 to 6.074 ms. A single Composition control moved from
+3.1872 / 3.8409 to 3.1506 / 3.8160 ms median / p99. The active build
+continues using the previous profile for the World 4 frame-time target.
+
+The refresh and the two controls are under build/checks/perf-030-pgo-refresh/.
+The comparison reports are in its comparison-live/ subdirectory.
+
+Removing the per-draw shader constant copy
+
+The renderer now reads the queued draw's vertex constants in place. It
+packs them into the existing shader buffer only when its data changes.
+The layout and exact floating-point bytes are preserved.
+
+Against the packet build with the same CPU profile, 7,230 matched frames
+per build measured 0.3979 to 0.3584 ms median draw-submission time. Their
+frame medians moved from 4.6906 to 4.6383 ms, and their p99s were 5.9976
+and 6.0085 ms. The three unfiltered World 4 runs on the final build
+measured 4.1987 / 5.6411, 4.6265 / 5.9275 and 4.31 / 6.01 ms median / p99.
+The largest working set was 315.71 MiB. GPU p99 ranged from 1.80 to
+2.12 ms. The 2.778 ms frame budget remains open.
+
+The final 1,043-draw World 4 capture replayed pixel for pixel with no D3D11
+errors. The live 360 Hz timing route retained 183 original ticks from
+goal to replay. The traced run reached its first game frame in 932.04 ms.
+Both executables built and linked with three workers.
+
+The final profile sampled 6,871 main-thread instruction pointers.
+Gpu::submit fell from 8.68% to 2.91% of samples. The largest remaining
+individual game routine was vertex skinning at 00021BE0 with 6.07%.
+Native samples are under build/checks/perf-030-uniform-profile/.
+
+Reports are under build/checks/perf-030-uniform-copy/. The measured
+executable SHA256 is
+41EEF28C76ECD3C866C823D6D99C729DC14EF6049804ECCAE43AE6FB557B392D.
+
+Batching streamed vertex uploads
+
+The renderer packs up to 32 queued draws into one dynamic vertex buffer
+upload, capped by the existing buffer capacity. Each group is submitted
+in order before a later upload can reuse its storage.
+
+Three interleaved World 4 runs per build used the same profile and
+settings on the Ryzen 5 5600X and GeForce RTX 5060 Ti. Across 8,448 frames
+per build matched by draw, vertex and packet counts and logic ticks,
+median buffer maps fell from 1,913 to 935 per frame and upload time fell
+from 0.5307 to 0.3511 ms. Frame median and p99 fell from 5.0869 and
+6.0463 ms to 4.8570 and 5.9331 ms. Unfiltered frame times varied. The
+three batch runs measured 4.9585 / 6.4083, 4.9467 / 5.8991 and
+4.2035 / 5.6402 ms median / p99. GPU p99 ranged from 1.85 to 2.17 ms.
+Peak working set was 320.35 MiB. The 2.778 ms budget remains open.
+
+The previous 1,043-draw capture and a fresh 806-draw World 4 capture
+both replayed with zero changed pixels and no D3D11 errors. The texture
+cache, CPU, input, audio and timing diagnostics passed. The live 360 Hz
+timing route retained 183 goal-to-replay ticks and 171 fresh motion
+samples. Both executables built and linked with three workers.
+
+Reports and comparison are under build/checks/perf-030-vertex-batch/.
+The measured executable SHA256 is
+548AF1720E742F952067D931C092FCC3CB515AD9850228822147439F017BD428.
+
+Keeping skinning intermediates in native registers
+
+A bounded native sample of World 4 found repeated writes of temporary
+XMM values in 00021BE0. The three checked blocks now keep these values
+in native registers and write them back at the end of each block. The
+ordinary path still handles split storage, access faults, unaligned
+MOVAPS operands and unmasked SSE exceptions.
+
+The native x86 lowering keeps the original arithmetic operand order
+on both paths. A probe executed the verified original SSE bytes from
+00021C35 and 00021D7A using three vertices with mixed NaN payloads and
+infinity. The new build matched all 18 output words. The prior compiler
+ordering disagreed on four payloads. Regular, aliasing, split-storage
+and expected-fault probes matched the previous build. Four pairs of
+1,200-call skinning probes kept identical output and measured 161.92 to
+155.11 ms at the median, including setup.
+
+Three interleaved World 4 pairs used the same profile and settings.
+Across 6,936 comparable frames per build, translated code fell from
+2.8933 to 2.7971 ms at the median and from 3.7530 to 3.6041 ms at p99.
+Frame median and p99 fell from 4.5026 and 5.7207 ms to 4.3865 and
+5.5032 ms. The three unfiltered runs measured 4.0066 / 4.9016,
+4.5097 / 5.5747 and 4.3831 / 5.4905 ms median / p99. GPU p99 ranged
+from 1.47 to 1.83 ms. Peak working set was 315.96 MiB.
+
+The 806-draw reference and a new 1,047-draw World 4 frame replayed
+pixel for pixel with no D3D11 errors. CPU, input, audio and timing
+diagnostics passed. The live timing route retained 183 goal-to-replay
+ticks and 171 fresh motion samples at the 360 Hz setting. Both executables
+built and linked with three workers. The 2.778 ms frame budget remains open.
+
+Reports are under build/checks/perf-030-xmm/. The measured executable
+SHA256 is
+2CB0ECD93BDD3E10E7209E35795CF356ED8AE6AD6871EF73D8F2BDF7A3203041.
+
+A separate 6,873-sample run recovered game callers for 696 of 930 CRT
+and ntdll samples. The hottest CRT callers were renderer draw submission
+(174 samples), vertex packing (146), command submission (81) and GPU
+draw queuing (64). Bounded native disassembly tied return addresses
+140FA324E and 140FD0A18 to the 3,072-byte vertex-constant comparison and
+queue copy. Caller data is in build/checks/perf-030-xmm/callers.json.
+
+Sharing unchanged vertex constants within a draw batch
+
+In the preceding 1,047-draw World 4 capture, 780 draws reused the previous
+draw's exact 3,072-byte constants. Queued draws now share immutable copies
+within a batch. Only rows touched by guest writes are compared before
+taking another copy. The renderer recognizes repeated copies in the same
+batch by address and retains byte comparisons across batch boundaries.
+The snapshot diagnostic passed for repeated scalar and bulk writes,
+signed zero, a NaN payload and preservation of earlier draws' bytes.
+
+Three interleaved pairs used the same save, settings and CPU profile.
+Across 10,330 comparable frames per build, median GPU command time fell
+from 0.8632 to 0.8399 ms and draw submission fell from 0.3538 to
+0.3292 ms. Frame median and p99 moved from 4.5080 and 5.6091 ms to
+4.4768 and 5.4353 ms. The three unfiltered runs measured 4.0616 / 5.3101,
+4.6244 / 5.4112 and 4.3319 / 5.4773 ms median / p99. GPU p99 ranged from
+1.77 to 1.79 ms. Peak working set was 316.36 MiB. The 2.778 ms frame
+budget remains open.
+
+The reference and the fresh 1,047-draw World 4 capture replayed pixel
+for pixel with no D3D11 errors. CPU, input, audio and timing checks passed.
+The live route kept 183 goal-to-replay ticks and 171 fresh motion
+samples at the 360 Hz setting. Both executables used three build and
+link workers.
+
+Reports are under build/checks/perf-030-constant-snapshots/. The measured
+executable SHA256 is
+F5BCDC1E41C5B0BB7ED1F56C8ED0559DD003E45810B9B1441296CDA942B95184.
+
+In a separate 6,886-sample profile, CRT samples attributed to renderer
+draw submission fell from 174 to 109 and those attributed to GPU draw
+queuing fell from 64 to 18. The integer array comparator had 237 samples.
+Recovered callers were GPU texture lookup (89), renderer draw submission
+(76), renderer pipeline preparation (51) and GPU target selection (21).
+Caller data is in build/checks/perf-030-constant-snapshots/callers.json.
+
+Reusing texture, target and pipeline lookups
+
+In the reference World 4 frame, 1,041 of 1,047 draws repeated the previous
+target and 956 of 1,505 texture bindings repeated on the same stage.
+The GPU now remembers the last target and resolved texture bindings.
+Target creation, resizing and resource eviction refresh the bindings.
+Queued draws also carry their prepared pipeline so submission can use
+it directly. Changes in image quality retire earlier pipeline handles.
+
+Four interleaved pairs used the same settings, save and CPU profile.
+Across 10,539 comparable frames per build, median GPU command time fell
+from 0.9118 to 0.8000 ms and draw submission fell from 0.3598 to 0.2680 ms.
+Frame median improved from 4.8162 to 4.6290 ms. P99 across all matched
+frames increased from 5.7430 to 7.2539 ms. The third candidate run reached
+9.9937 ms p99, with slow frames clustered in the second half and spikes
+in translated code as well as GPU commands. The cause was not isolated.
+The three other candidate runs had p99s of 5.4741, 5.4028 and 5.5019 ms.
+The median of run p99s was 5.6450 ms before and 5.4880 ms after.
+Peak working set was 316.73 MiB. The 2.778 ms frame budget remains open.
+
+Texture binding, image blit and bump mapping checks passed. The reference
+frame and a fresh 902-draw frame replayed pixel for pixel with no D3D11
+errors. CPU, input, audio and timing checks passed. The 360 Hz timing
+route retained 183 goal-to-replay ticks and 171 fresh motion samples.
+Both executables built and linked with three workers.
+
+Reports are under build/checks/perf-030-lookups/. The measured executable
+SHA256 is
+90E7850813D17311281725DCBD7F886CF04A98A06E85C838AED55207411FFAF0.
+
+A separate 6,877-sample profile counted 83 integer array comparisons,
+down from 237 in the previous 6,886-sample run. Recovered texture lookup
+callers fell from 89 to 36, and no recovered comparisons came from draw
+submission or target selection. See callers.json in the report folder.
+
+Indexing physical RAM aliases, 2026-11-06
+
+A fresh 6,903-sample PRO SKATERS profile on the Ryzen 5 5600X and
+GeForce RTX 5060 Ti still attributed 1.88% of samples to mapped_pointer.
+The sparse page index covered pageable allocations but omitted the static
+80000000/F0000000 RAM aliases. Complete pages of these mappings now share
+the same index. Partial pages and spans crossing page boundaries retain
+the checked range lookup. The existing CPU bounds diagnostic also checks
+unaligned mapping ends and dynamic unmapping beside a static alias.
+
+Three alternating 20-second windows per build used the frozen World 4 save,
+native 1x widescreen, VSync off, 360 Hz selected and the existing CPU profile.
+Across 10,267 frames per build grouped by logic ticks and bins of 16 draws,
+2,048 vertices and 256 packets, median guest time fell from 2.6745 to
+2.5770 ms. Frame median/p99 fell from 4.0082/5.1349 to 3.9057/5.0573 ms.
+The groups averaged about 849 draws and 87,200 vertices per frame.
+
+Unfiltered candidate median/p99 pairs were 3.9333/5.1191, 3.8369/4.9230
+and 4.4102/5.2217 ms. The middle run p99 increased from 5.0321 to
+5.1191 ms; the stage workload varies, so these runs alone do not establish
+a general p99 improvement. Candidate GPU p99 ranged from 1.63 to 1.67 ms.
+Peak working set was 316.01 MiB. Complete routes took 48.86..48.90 seconds.
+The 2.778 ms frame target remains open. Builds and links used three workers.
+
+The isolated memory-change executable SHA256 is
+EA0F1A7DDD32897D2DE1D281C891DE55BB215BC633CE61D35F75275F33DD017B.
+Reports are under build/checks/perf-031-pro-skaters/pages-comparison/.
+The earlier qualification and native sample are in the same parent folder.
+
+Reusing floating control and vertex layout metadata
+
+The checked SIMD blocks now read the tracked guest exception-mask bits
+instead of executing STMXCSR for every vertex. Floating-state entry/exit
+already tracks these bits; the LDMXCSR lowering now also updates them.
+Sticky exception flags continue to come from the actual hardware state.
+Regular, overlapping, split-storage, nonfinite and expected-fault probes
+matched the prior executable. Fast and fallback paths also matched with
+each of the four rounding modes. The fixed 1,200-call probe did not show
+a clear isolated time reduction; no microbenchmark speedup is claimed.
+Recipes and outputs are under perf-031-pro-skaters/{simd-probes,control-probes}.
+
+Native samples also located repeated format-width/alignment calculations
+inside draw_streams. Input layouts now retain those immutable values;
+draw-specific stride, count and storage checks remain per draw.
+Three alternating World 4 windows per build matched 8,452 frames across
+37 workload groups with the same grouping rules as above. Median upload
+time fell from 0.3498 to 0.3437 ms. Matched frame median/p99 moved from
+4.4691/5.4089 to 4.4449/5.3597 ms, a small change. These groups averaged
+about 985 draws and 95,700 vertices per frame.
+
+The three unfiltered candidate median/p99 pairs were 4.4810/5.2753,
+4.3594/5.6713 and 4.4016/5.1206 ms. GPU p99 ranged from 1.62 to 1.83 ms;
+peak working set was 315.70 MiB. The 2.778 ms target remains open.
+
+All 196 service checks passed. The 902-draw World 4 reference, a 1,437-draw
+Night Sky Rocket Lane reference and a fresh 801-draw World 4 capture each
+replayed with zero changed pixels and no D3D11 errors. Both executables
+built and linked with three workers. The four silent timing routes passed
+at 60/144/360/Unlimited, retaining 183 original goal-to-replay ticks.
+
+The following 6,886-sample native profile attributed 0.22% to the remaining
+range lookup, 4.18% to skinning at 21BE0, 2.03% to 2F4A0 and 0.87% to
+draw_streams. CRT routines accounted for 9.48%. Scene workload varies;
+these samples identify the next work, not isolated optimization gains.
+Reports are under build/checks/perf-031-pro-skaters/layouts/,
+layout-validation/ and profile-after/. The layout-build game SHA256 is
+2BDC7CD1CC03FA89857BBE3329CEBFB322BFFB8B13D47FAA9849C37E2D37DEE6.
+
+Parity flags and refreshed CPU profile, 2026-11-06
+
+Bounded native disassembly found repeated software population counts in
+the guest SDK helper at 3267F0. Parity now uses a 16-entry bit lookup;
+the CPU diagnostic checks every byte at all three guest operand widths.
+The change invalidated 9,158 old profile hashes and grew the untrained
+game to 127,754,240 bytes. Fixed-workload probes did not establish a
+speedup with that stale profile, so those timings are not acceptance data.
+
+A new profile trained the identical source on PRO SKATERS and Composition.
+The resulting profile covers 18,540 functions with zero hash mismatches.
+The normal game shrank to 74,725,888 bytes. Instrumented training runs are
+excluded from all speed comparisons. Both builds and links used three
+workers. All 594 timing checks and four silent live timing routes passed;
+the routes retained 183 original goal-to-replay ticks.
+
+Three alternating pairs on the Ryzen 5 5600X and RTX 5060 Ti matched 5,688
+frames across 50 workload groups. Frame median/p99 fell from 5.8923/7.1084
+to 4.2018/5.0528 ms; guest median/p99 fell from 4.3805/5.3014 to
+2.7600/3.3696 ms. These are results of refreshing the stale profile on
+the same source, not an isolated parity-lookup gain. Groups averaged about
+937 draws, 91,800 vertices and 19,670 packets per frame.
+
+Unfiltered candidate median/p99 pairs were 4.1621/5.1320, 3.7204/4.7375
+and 3.5170/4.7271 ms. GPU p99 ranged from 1.56 to 1.69 ms; peak working
+set was 316.22 MiB. Complete routes took 48.87..48.89 seconds. The
+2.778 ms target remains open. Fixed-workload SIMD probes matched all
+reported bytes, registers, flags, checkpoints and expected faults.
+
+The profile SHA256 is
+5042EE080DF8C762E4A3787C7FB87759208E3EC4572C885DEF38F11B9DCDBC3C.
+The measured game SHA256 is
+F160AC504CD54F863AB44B781E27B1646798981DE34929A28B8CDDB41AB8F565.
+Profile provenance is under build/checks/perf-031-pgo-refresh/; comparisons
+and samples are under perf-031-pro-skaters/{pgo,pgo-probes,profile-pgo}.
+
+Rejected full-status native capture experiment
+
+A call/return-boundary LAHF/SETO lowering passed exhaustive 8-bit operand
+pairs, 16/32-bit boundaries and the existing CPU probes. A fresh two-scene
+profile covered 18,539 functions with zero mismatches; all 638 timing checks
+and four live routes passed. The experiment still did not improve the game.
+
+Three alternating pairs matched 10,902 frames across 87 workload groups.
+Frame median/p99 changed from 4.1836/5.0221 to 4.2001/5.1455 ms. Guest median
+changed from 2.7653 to 2.7405 ms, but guest mean rose from 2.6574 to
+2.6722 ms. Groups averaged about 922 draws, 91,000 vertices and 19,340
+packets. Candidate unfiltered median/p99 pairs were 4.1222/5.1349,
+4.3254/5.2423 and 3.5254/4.9520 ms. The additional native helpers,
+feature check and lowering selector were removed. Portable flag rules and
+the proven parity lookup remain. The 2.778 ms target remains open.
+
+The rejected game SHA256 is
+9E9FD84E49608076F5D666479747EB61342664A8905687BD16EF26A8A8FC83AF.
+Its profile SHA256 is
+A983238F220DC7E98F7C1B37023778E7C93372D38957DBA82E151C2B0ECD4118.
+Evidence is under perf-031-pro-skaters/{native-flags,native-flags-probes};
+the profile and frozen validation reports are in perf-031-native-flags-pgo/.
+
+Single comparison for primary RAM, 2026-11-06
+
+Native samples located repeated primary RAM bounds checks inside 22CC0.
+Access and try_access now share one predicate: a 32-bit address difference
+is widened before adding the range size. The constructor already bounds
+primary storage at 2^32. Wrapped nonempty ranges cannot fit; zero-length
+ranges separately retain the original rejection below the primary base.
+Mapped-region lookup and errors remain unchanged. The existing RAM bounds
+diagnostic now also covers primary storage ending at 2^32 and empty spans.
+
+A standalone bounded check matched 2,010,934 edge/random predicates. Its
+fixed-word wrappers shrank from nine native instructions to five; bounded
+inspection of the actual 22CC0 game code confirms one range comparison.
+Standalone timings were order-sensitive, so they are not speedup evidence.
+
+The combined build includes the independently verified mode5 FOV correction;
+that branch is inactive in normal rolling PRO SKATERS mode0. A fresh CPU
+profile trained on PRO SKATERS and Composition covers 18,544 functions with
+zero hash mismatches. The normal game is 71,845,376 bytes. All compilation
+and linking used three workers; instrumented timings are excluded.
+
+Three alternating pairs on the Ryzen 5 5600X / RTX 5060 Ti matched 11,875
+frames in 87 workload groups. Frame median/p99 fell from 3.7724/5.0256 to
+3.4358/4.5643 ms; guest median/p99 fell from 2.4704/3.4758 to
+2.1243/2.9712 ms. Frame mean fell from 3.8191 to 3.4838 ms and guest mean
+from 2.5237 to 2.1701 ms. Groups averaged about 865 draws, 88,222 vertices
+and 17,814 packets per frame. Median GPU commands moved from 0.7051 to
+0.7136 ms, draw submission from 0.2241 to 0.2252 ms and uploads from
+0.2871 to 0.2897 ms. The improvement is in translated CPU work.
+
+Unfiltered candidate median/p99 pairs were 3.6586/4.7458, 3.1842/4.1198
+and 3.4090/4.4551 ms. GPU p99 ranged from 1.59 to 1.66 ms. Peak working
+set was 319.29 MiB; complete routes took 48.86..48.88 seconds. The
+2.778 ms target remains open.
+
+All 24 CPU and 196 service checks passed. Fixed-workload probes preserved
+bytes, registers, flags and expected faults. All 704 timing checks passed,
+as did four silent live routes with 183 goal-to-replay ticks. The FOV helper
+also matched 60 independent original-map scenarios and two whole-tick
+register/flags boundary cases. A 902-draw PRO reference, a 1,437-draw Night
+Sky reference and a fresh 706-draw PRO capture replayed with zero changed
+pixels and no D3D11 errors. The fresh route stayed in World4/stage0/rolling
+state and completed all scripted input; its capture was complete/untruncated.
+
+A subsequent 6,888-sample native profile attributed 1.52% to 22CC0, versus
+2.95% in the prior profile. CRT routines accounted for 9.73%, Gpu::submit
+4.65%, skinning21BE0 4.37% and SDK3267F0 3.63%. Workload varies; these
+samples choose subsequent work rather than establish isolated speedups.
+
+The game SHA256 is
+85BC845795E0839AE2F15511E9105607125A174E97B0F36CC8B1685137C15365.
+The CPU profile SHA256 is
+AEE6B8F7BEE6B4444921905C5A55A13636AE9E479CEAD649E95146625EB03D29.
+Reports, probes, samples and captures are in build/checks/perf-032-primary-bounds/.
+Profile/source provenance and frozen timing results are in
+build/checks/perf-032-bounds-pgo-corrected/.
+
+Rejected single-sample dirty-tracking experiment
+
+After the shake timing milestone passed, an identical-source comparison
+tested skipping the renderer's target-dirty map lookup when MSAA is off.
+All 759 timing checks, 187 presentation/quality checks, 22 texture checks,
+16 bump checks and the 902/1437/706-draw pixel replays passed.
+
+Three alternating pairs matched 9,734 frames across 86 workload groups.
+Frame median/p99 changed from 3.7590/4.4519 to 3.7961/4.5597 ms, and
+mean from 3.5108 to 3.5393 ms. Guest mean changed from 2.1921 to
+2.2178 ms; draw-submission mean changed from 0.22665 to 0.22554 ms.
+No overall frame-time gain was established. The condition was removed
+and the validated shake build was restored, preserving the RAM improvement.
+
+Reports are under build/checks/perf-033-target-binding/. The restored game
+SHA256 is
+FBC1FD7FE5BB0C0530B31F80722ADB35B6F171418207E2A95C01E983C80D8B4B.
+Its timing acceptance is recorded in
+build/checks/timing/research/camera-shake/accepted-shake.json.

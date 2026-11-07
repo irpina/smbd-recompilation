@@ -53,7 +53,7 @@ try {
             [IO.File]::WriteAllText([IO.Path]::GetFullPath("$prefix.stderr"),$stderr.GetAwaiter().GetResult())
         }
         $exit=$process.ExitCode; $process.Dispose()
-        $goalTicks=$null; $goalSeconds=$null; $fresh=0; $held=0; $drawless=0; $samples=@()
+        $goalTicks=$null; $goalSeconds=$null; $fresh=0; $held=0; $drawless=0; $cameraFresh=0; $cameraHeld=0; $goalCameraFresh=0; $goalCameraHeld=0; $samples=@()
         try {
             $run=Get-Content -LiteralPath "$prefix.stdout" -Raw | ConvertFrom-Json
             $motion=Get-Content -LiteralPath "$prefix-motion.json" -Raw | ConvertFrom-Json
@@ -75,14 +75,28 @@ try {
                 # setup, pauses, goal-flight holds and authored clip boundaries.
                 $rolling=$a.ball_state -eq 32 -and $b.ball_state -eq 32
                 $replaying=$a.ball_state -eq 10 -and $b.ball_state -eq 10 -and $a.replay_time -lt 220 -and $b.replay_time -gt 205
+                # B00D0 (type 15) follows the active upward goal flight.
+                # The old route checked rolling/replay but missed its holds.
+                if($a.ball_state -eq 6 -and $b.ball_state -eq 6 -and $a.camera_state -eq 15 -and $b.camera_state -eq 15 -and
+                   $a.velocity[1] -gt 0.01 -and $b.velocity[1] -gt 0.01) {
+                    if(($a.camera_matrix -join ',') -eq ($b.camera_matrix -join ',')){++$goalCameraHeld}else{++$goalCameraFresh}
+                }
                 if(!$rolling -and !$replaying){continue}
                 if(($a.ball -join ',') -eq ($b.ball -join ',') -or ($a.matrix -join ',') -eq ($b.matrix -join ',')){++$held}else{++$fresh}
+                if($rolling) {
+                    if($a.camera_matrix.Count -ne 12 -or $b.camera_matrix.Count -ne 12) { throw 'Missing complete camera view matrices.' }
+                    if(($a.camera_matrix -join ',') -eq ($b.camera_matrix -join ',')){++$cameraHeld}else{++$cameraFresh}
+                }
                 if($b.draws -le $a.draws){++$drawless}
             }
             if(!$fresh -or $held -or $drawless) { $failure="Motion/drawing failed: fresh=$fresh, held=$held, drawless=$drawless." }
+            if(!$cameraFresh -or $cameraHeld) { $failure="Rolling camera failed: fresh=$cameraFresh, held=$cameraHeld." }
+            if(!$goalCameraFresh -or $goalCameraHeld) { $failure="Goal-flight camera failed: fresh=$goalCameraFresh, held=$goalCameraHeld." }
         } catch { $failure=$_.Exception.Message }
         $results.Add([pscustomobject]@{rate=$rate;passed=(!$failure);exit=$exit;failure=$failure;samples=$samples.Count;goal_to_replay_ticks=$goalTicks;
-            goal_to_replay_seconds=$goalSeconds;fresh_motion=$fresh;held_motion=$held;drawless_scenes=$drawless;motion="$prefix-motion.json"})
+            goal_to_replay_seconds=$goalSeconds;fresh_motion=$fresh;held_motion=$held;drawless_scenes=$drawless;
+            fresh_camera_matrices=$cameraFresh;held_camera_matrices=$cameraHeld;
+            fresh_goal_camera_matrices=$goalCameraFresh;held_goal_camera_matrices=$goalCameraHeld;motion="$prefix-motion.json"})
         Write-Host "Live timing $rate Hz: $($results[-1].passed), $goalTicks goal/replay ticks, $fresh fresh motion samples."
     }
     if((Get-FileHash -LiteralPath $Game -Algorithm SHA256).Hash -ne $gameHash) { throw 'Game executable changed during live timing checks.' }

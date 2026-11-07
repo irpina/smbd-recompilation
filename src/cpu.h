@@ -8,7 +8,9 @@
 #include <cstdint>
 #include <cstring>
 #include <format>
+#include <iterator>
 #include <map>
+#include <memory>
 #include <span>
 #include <stdexcept>
 #include <string_view>
@@ -63,6 +65,7 @@ struct Cpu {
     std::uint32_t gdt_base = 0;
     std::uint16_t gdt_limit = 0;
     bool ultrawide = false;
+    bool unlimited_render_distance = false;
 };
 
 class NativeBoundary : public std::runtime_error {
@@ -121,19 +124,13 @@ public:
         if (bytes.size() > 0x100000000ULL - base)
             throw std::runtime_error("Guest memory wraps the address space");
     }
-    void map(std::uint32_t base,std::span<std::byte> bytes) {
-        const auto end=static_cast<std::uint64_t>(base)+bytes.size();
-        if(bytes.empty() || end>0x100000000ULL || region_count_==regions_.size())
-            throw std::runtime_error("Invalid or exhausted guest memory mappings");
-        const auto overlaps=[&](std::uint32_t other,std::size_t size) {
-            return base<static_cast<std::uint64_t>(other)+size && other<end;
-        };
-        if(overlaps(base_,bytes_.size())) throw std::runtime_error("Guest mappings overlap");
-        for(unsigned i=0;i<region_count_;++i) if(overlaps(regions_[i].base,regions_[i].bytes.size()))
-            throw std::runtime_error("Guest mappings overlap");
-        regions_[region_count_++]={base,bytes};
-    }
+    void map(std::uint32_t base,std::span<std::byte> bytes);
     void* access(std::uint32_t address, std::size_t size) const { return pointer(address,size); }
+    std::byte* try_access(std::uint32_t address,std::size_t size) const noexcept {
+        if(contains_primary(address,size)) return bytes_.data()+std::uint32_t(address-base_);
+        if(auto* result=page_pointer(address,size)) return result;
+        return mapped_pointer(address,size);
+    }
     void map_dynamic(std::uint32_t base,std::span<std::byte> bytes);
     void unmap_dynamic(std::uint32_t base,std::uint32_t size);
     void publish_writes() const { std::atomic_thread_fence(std::memory_order_seq_cst); }
@@ -205,11 +202,24 @@ public:
         else for (std::uint32_t i = 0; i < count; ++i) std::memcpy(to + i * sizeof(T), &value, sizeof(T));
     }
 private:
+    bool contains_primary(std::uint32_t address,std::size_t size) const noexcept {
+        const auto offset=std::uint32_t(address-base_);
+        // The constructor bounds storage at 2^32, so a wrapped offset cannot
+        // fit a nonempty range. Empty ranges must still reject addresses below base.
+        return size<=0x100000000ULL && std::uint64_t(offset)+size<=bytes_.size() && (size || address>=base_);
+    }
     std::byte* pointer(std::uint32_t address, std::size_t size) const {
-        const auto offset=static_cast<std::uint64_t>(address)-base_;
-        if(size<=bytes_.size() && offset<=bytes_.size()-size) return bytes_.data()+offset;
+        if(contains_primary(address,size)) return bytes_.data()+std::uint32_t(address-base_);
+        if(auto* result=page_pointer(address,size)) return result;
         if(auto* result=mapped_pointer(address,size)) return result;
         range_error(address,size);
+    }
+    std::byte* page_pointer(std::uint32_t address,std::size_t size) const noexcept {
+        const auto& table=pages_[address>>(page_bits+table_bits)];
+        const auto offset=address&(page_size-1);
+        if(!table || !size || size>page_size-offset) return nullptr;
+        const auto page=(*table)[(address>>page_bits)&(table->size()-1)];
+        return page?page+offset:nullptr;
     }
     // Lookup only reads mapping metadata. Keep throwing/error formatting separate
     // so a rare mapping lookup cannot invalidate live CPU/SIMD values.
@@ -224,6 +234,12 @@ private:
     struct Region { std::uint32_t base; std::span<std::byte> bytes; };
     std::array<Region,8> regions_{};
     unsigned region_count_=0;
+    // Complete static and dynamic pages share the load/store index. Ranges
+    // retain partial pages and contiguous spans crossing page boundaries.
+    static constexpr unsigned page_bits=12, table_bits=10;
+    static constexpr std::uint32_t page_size=1U<<page_bits;
+    using PageTable=std::array<std::byte*,1U<<table_bits>;
+    std::array<std::unique_ptr<PageTable>,1U<<(32-page_bits-table_bits)> pages_;
     std::map<std::uint32_t,std::span<std::byte>> dynamic_regions_;
 };
 
@@ -244,10 +260,24 @@ inline void load_code_selector(Cpu& cpu,const Memory& memory,std::uint16_t selec
 inline __m128 scalar_vector(std::uint32_t bits) {
     return _mm_castsi128_ps(_mm_cvtsi32_si128(std::bit_cast<std::int32_t>(bits)));
 }
+inline __m128 load_scalar_vector(const void* source) {
+    std::uint32_t bits;
+    std::memcpy(&bits,source,sizeof(bits));
+    if constexpr(std::endian::native==std::endian::big) bits=std::byteswap(bits);
+    return scalar_vector(bits);
+}
+inline __m128 load_vector(const void* source) {
+    __m128 value;
+    std::memcpy(&value,source,16);
+    return value;
+}
 inline __m128 load_vector(const Memory& memory,std::uint32_t address) {
     __m128 value;
     std::memcpy(&value,memory.access(address,16),16);
     return value;
+}
+inline void store_vector(void* target,__m128 value,bool scalar) {
+    std::memcpy(target,&value,scalar?4:16);
 }
 inline void store_vector(Memory& memory,std::uint32_t address,__m128 value,bool scalar) {
     std::memcpy(memory.access(address,scalar?4:16),&value,scalar?4:16);
@@ -266,8 +296,10 @@ inline constexpr std::uint32_t arithmetic_flags = carry | parity | auxiliary | z
 template<unsigned Bits> constexpr std::uint32_t mask = static_cast<std::uint32_t>((1ULL << Bits) - 1);
 template<unsigned Bits> constexpr std::uint32_t szp(std::uint32_t value) {
     value &= mask<Bits>;
+    // Fold the low byte's two nibbles; bit n of 9669 is its even parity.
+    const auto even_parity=(0x9669U >> ((value^(value>>4))&15U))&1U;
     return (value == 0 ? zero : 0) | ((value >> (Bits - 1)) ? sign : 0) |
-           ((std::popcount(value & 255U) & 1) == 0 ? parity : 0);
+           (even_parity ? parity : 0);
 }
 template<unsigned Bits> constexpr std::uint32_t logic_flags(std::uint32_t flags, std::uint32_t value) {
     // AF is architecturally undefined for logical operations; keep its previous value.
@@ -291,6 +323,7 @@ template<unsigned Bits> constexpr std::uint32_t add_flags(std::uint32_t flags, s
            (((a ^ b ^ result) & 16U) ? auxiliary : 0) |
            ((~(a ^ b) & (a ^ result) & (1U << (Bits - 1))) ? overflow : 0);
 }
+
 template<unsigned Bits> constexpr std::uint32_t sign_extend(std::uint32_t value) {
     constexpr auto high = 1U << (Bits - 1);
     return ((value & mask<Bits>) ^ high) - high;

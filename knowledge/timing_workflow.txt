@@ -1,18 +1,101 @@
-Systematic timing research, 2026-11-03
+Issue-directed timing workflow, 2026-11-06
 
 Target: Super Monkey Ball Deluxe USA XBE from the local XISO.
 SHA256: 9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2.
 
-Run tools/Build.ps1 -Stage Timing -LiveTiming -Workers 3 for generation, both
-native executables, existing CPU/input/audio checks, the timing audit and four
-silent gameplay routes. Omit -LiveTiming for the numeric/research stage. This reuses
-prepared, verified XISO extraction. Run the All stage only if preparation is
-missing/stale. The user requested three workers for this work.
+Start from a reported symptom and its capture. Recover only the owning update,
+its shared producers/consumers and relevant drawing boundary. Reuse existing
+address research. Whole-game recurrence inventory is optional research, not a
+prerequisite for fixing or validating an issue.
 
-tools/Audit-Timing.ps1 -InventoryOnly reuses build/generated/batch.json.
-Without that switch it also executes knowledge/timing_cases.json through
-the same AOT code as the game. No Python, runtime instruction decoding,
-third executable, audio playback or computer use is involved.
+Build with tools/Build.ps1 -Stage Game -AllowPartial -Workers 1, then build the
+release smbd-tool target with one worker when its shared core changed. For the
+bowling trail, goal camera, stopped replay objects, rolling recovery and HUD:
+  tools/Audit-Timing.ps1 -Cases knowledge/timing_issues.json -ProbesOnly
+
+Select existing related cases without constructing the whole-game inventory:
+  tools/Audit-Timing.ps1 -Only 'animation-*','character-*','goal-flight'
+-Only accepts case-name patterns and implies -ProbesOnly. A missing pattern is
+an error. Reports record the selected cases and explicitly say no inventory was
+scanned. -ProbesOnly can also run a small, separate issue manifest. Both modes
+still verify the executable, compiled graph, tool/case hashes and capture hashes.
+Use focused hidden/muted live routes after the numeric checks. Visual checking
+remains manual. Run All only if prepared extraction is missing or stale.
+
+Reported capture corrections, same verified executable:
+
+- Bowling frame-1794013061657-964389581700: 1B12C0 advanced the 32-entry
+  trail ring at 802098/8020A0 and its UV/aging state on every draw. The
+  update prefix now follows rule ticks; drawing at 1B14DC still runs on
+  every scene. Three ticks previously advanced the ring from 1 to 4 at
+  60 Hz and to 19 at 360. Both now reach 4 with identical history bytes.
+- Goal frame-1794013194283-1097015884300 selects camera type 15, B00D0
+  (camera+1E, table slot 56A0CC). B75B1 held that controller between rule
+  ticks even though its ball and character moved continuously. Its coupled
+  orbit, velocity and lagged-target rule now uses the same bounded private
+  camera/ball forecast mechanism as the rolling camera, with its own target
+  sampling and controller ownership. The original full rule still owns all
+  committed response state. No completed images or old frame pairs are kept.
+  The initial live 360-cap route had 471 held versus 134 fresh view matrices
+  during active upward flight in camera state 15, exposing the missed path.
+- Replay frame-1794013197878-1100610765100 has stopped stage group 1.
+  Integer replay times 61 and 62 both reconstruct clock 599. The fractional
+  sampler at 27A8B7 nevertheless subtracted an unconditional fraction:
+  time 61.5 became clock 598.5. Use the recorded control code's speed
+  (1,0,-1,2,-2), also at saved-replay counterpart 24980A. All fractional
+  stopped samples now remain 599. Both formats are probed with all five
+  control codes using small original-layout recording records.
+- Rolling recovery had two remaining coupled boundaries. 88FF1 already
+  scaled its turn, but 88F58 retained the full 0.01 (1-dot) snap cone. A
+  six-degree lean disappeared in the first 360 Hz scene. Fractional snaps
+  now respect the actual quantized turn. 29F40 also discards dot>.99999
+  rotations, leaving small fractional recovery angles permanently tilted.
+  Only recovery call 8902F retains that near-parallel cross-product rotation
+  with a stable double-precision quaternion. Other angles/callers and whole
+  original ticks still execute the original AOT routine. Signed recovery,
+  original 50 Hz rules, pause and final upright state have separate probes.
+  Recovery uses scene time independently of the ball's measured rotation
+  units. The same prefix with legacy party-game ball type 25 failed nine
+  fractional schedules before correcting that distinction; whole ticks were
+  already correct. Its source ball transforms retain their original units.
+- Recurring character HUD drawing at 4D050 also advanced expression age,
+  delays, blink state and turn state on rendered scenes. Preserve rule
+  cadence for discrete state, sample constant turns with integer phase
+  boundaries, and integrate the original capped fallout acceleration at
+  4D434. A full interval beginning at a fractional phase must retain that
+  phase, rather than incorrectly taking the original whole-tick shortcut.
+  Starting at age 40, three ticks previously ended at age 43/angle F040
+  at 60 Hz and age 58/angle 90A0 at 360. Both now give 43/F040 exactly.
+
+Bounded original analyses, before/after snapshot recipes and reports are in
+build/checks/targeted-timing/. knowledge/timing_issues.json pins the three
+snapshot hashes. delivery-matrix/report.json passes 209 issue checks across
+60, 30-cap, 75, 120, 144, 165, 240, 360 and 1000 Hz numeric schedules,
+uneven uncapped intervals and catch-up intervals. These schedules are CPU
+probes, not measured monitor rates or visual acceptance. The selected shared
+camera/animation/character/replay cases pass another 330 checks in
+delivery-related-matrix/report.json. Earlier complete/final matrices are
+intermediate research, superseded by these delivery reports.
+
+Delivery validation on Windows, Ryzen 5 5600X / GeForce RTX 5060 Ti:
+24 native CPU cases pass; generation retains 10632 functions and zero
+unresolved call sites. Compilation and linking used one worker. Both muted,
+isolated 60/360-cap story routes retain the 183-tick goal-to-replay transition.
+Active upward flight in camera state 15 has 101/612 fresh view matrices and
+zero held views. The captured camera prefix changes from 14 held/3 fresh
+intermediate intervals to zero held/17 fresh, with original 60 Hz bytes intact.
+The complete 60 Hz replay rolling trace also remains byte-identical.
+A muted Night-Sky Rocket Lane smoke run completes 180 rule ticks and 563
+rendered scenes. Its benchmark retains CPU/GPU/frame/memory measurements;
+this short run is not a sustained 360 FPS or visual-parity claim.
+report.json ties the current game/tool/case hashes to all delivery results.
+No game/build workers remain running. Manual visual acceptance is separate.
+
+tools/Audit-Timing.ps1 -InventoryOnly explicitly requests the broad research
+index from build/generated/batch.json. The historical -Stage Timing workflow
+also runs that broad inventory and its full case manifest. Neither is needed
+for issue-directed work. No Python, runtime instruction decoding, third
+executable, audio playback or computer use is involved.
 tools/Check-TimingLive.ps1 follows with isolated, hidden/muted story/replay
 runs at 60/144/360/Unlimited. Its local save seed is copied separately for
 each run; user settings and saves are not written. Override -StorageSeed
@@ -275,3 +358,295 @@ under build/checks/timing/research/next-counters.
 The three-worker build passed the four muted story routes, all with the
 183-tick goal-to-replay transition and fresh motion and draws in the
 checked windows.
+
+Camera bank follow-up, 2026-11-06
+
+B3BA0 is a continuous camera controller. Its B4296..B42BD bank decay
+multiplied signed camera+1C by pow(402480,60/6C7F48) once per rendered
+scene. Starting at either sign of 1000, five original ticks ended at
+771 at 60 Hz, 207 at 360 and 3 at 1000 (with matching negative signs).
+The original integer recurrence now commits on rule ticks. Drawing
+samples between those original integer endpoints, without feeding the
+rounded display sample back into the next rule. The rest of the camera
+routine still runs per scene.
+
+ADFC0 and B7350 establish five camera records at 73F1A0, stride 28C.
+History is bounded to those five slots; record/array initialization and
+the shared diagnostic reset discard it. The generic ADFC0 invalidation
+leaves unrelated initializer arguments alone. A same-visible-value reset
+case verifies that old hidden rule state cannot survive initialization.
+
+Nine new cases cover both signs, the fifth record, pause/resume, reset,
+the original 50 Hz clock, a 60-to-50 clock change, and positive/negative
+20-unit truncation boundaries. The complete matrix passed 528 checks;
+all 99 camera-bank checks use exact integer expectations and tolerance 0.
+The original rule results still come from AOT pow/conversion. A trailing
+phase previews only the following drawing endpoint; it cannot change
+the next committed rule. The numeric cases cover that preview at both
+original clock frequencies and across a frequency change.
+
+The first audit reported 527/528 because its integer drawing oracle used
+double schedule time instead of the float phase actually sent in the
+recipe. At 4.8 ticks, float phase 0.800000011920929 gives
+792-40*phase = 759.999999523, correctly truncating to 759. The old oracle
+computed 760.00000000000023 and exceeded a one-unit bound by rounding
+noise. Integer phase samples now explicitly quantize that actual float
+input and truncate; the bound was tightened to zero. The failed combined
+workflow log remains in research/camera-bank/build.log; audit-after.log
+and the timestamped report record the corrected audit against the same
+native binaries.
+
+CPU (23), input (58), audio (37), and clock (31) checks passed. The four
+isolated hidden/muted story routes passed at 60/144/360/Unlimited, each
+with 183 goal-to-replay ticks and 91/124/171/263 fresh motion samples.
+No held motion samples or drawless scenes occurred in the checked windows.
+The live executable hash and route details are in live-report.json.
+This does not certify arbitrary camera modes or manual visual parity.
+
+Bounded HUD analysis also classified twelve layout/queue candidates:
+68840 copies positions before applying width/height anchors, 68B60/68E00
+advance glyph cursors, 691C0 aligns nine-slice sprites, and 6A1E0 drains
+draw records before clearing the count. Their original arithmetic remains.
+
+Remaining camera research: bank-adjacent yaw still differs with refresh.
+From signed yaw 100 and a stationary target, five ticks through B3BA0
+end at 34 at 60 Hz, 84 at 360 and 94 at 1000, with matching negative
+signs. Each locks after its first scene: B3BA0 overwrites the old target
+and lookahead vector before the next fractional scene. This requires
+research of their shared ownership, not just another gain multiplier.
+Recipes and original code are in timing/research/camera-velocity.
+The suspected velocity transition from B3BA0 into AFF40/B03F0 was not
+proved: B5790/B5A80/B5D90 reset through ADFC0 before seeding new velocity.
+Those displacement stores have deliberately not been changed.
+
+Coupled camera rule and scene sampling, 2026-11-06
+
+The initial bank-only fix was folded into the complete B3BA0 camera rule.
+B3D2B..B3D6F replace the previous target and B41D8 replaces its lookahead.
+With stationary target and signed initial yaw100, original60Hz ends at34;
+the former per-scene path ended at84 at360 and94 at1000. Only its first
+fractional scene still saw the original angular impulse.
+
+The original full controller now commits on rule ticks. Intermediate
+scenes evaluate its next original rule on a private28C-byte camera record.
+Only display position/target/angles are sampled; +9C..B0 displacement,
+B4..BC lookahead, C0 response and114 yaw delta remain original rule state.
+Preview uses private CPU/floating state and restores the48-byte shared
+transform and all five73FE60 counters. Its original next counter is evaluated before restoration.
+ADFC0/B7350 and shared diagnostic reset invalidate the five bounded slots.
+
+B74C0 overwrites controller return flags with ADD ESP and replaces ECX
+before27F60, which overwrites EAX/EDX. Its subsequent view construction at
+B7753->28410 rebuilds camera+14C every scene. A complete twelve-float view
+matrix is now captured only when motion diagnostics are requested.
+
+Interpolating absolute target coordinates introduced a second defect:
+constant motion lagged by up to0.08 world units and a teleport by11.03 in
+the supplied probes. B3D2B/B3D6F copy current ball X/Z; B3D53..65 add the
+fixed stage height to Y. Scene drawing retains that current translation
+and samples only the relative orbit/angles. A private1B0-byte ball copy
+supplies at most one remaining tick of original-unit velocity forecast
+to the original display response. The actual ball argument to committed
+rules is never replaced or reconstructed from post-impact velocity.
+
+The forecast is display-only. It does not know future acceleration,
+impacts or teleports, and is not a proof that globally scheduled rules
+see identical physical input samples at every rendering rate.
+
+The integrated54-case matrix passed594 checks, including the original
+8A2C0 constant-velocity producer followed by camera target sampling.
+All99 prior bank checks remain exact, alongside signed yaw, pause,
+same-visible reset, last-record, counter and preview-isolation cases.
+CPU24/input58/audio37/clock31 checks passed in the same build.
+
+The24 paired research scenarios cover constant motion, acceleration,
+instantaneous direction reversal and explicit teleport at60/75/360/1000,
+jitter and catch-up schedules. An independent frozen original-AOT run
+receives the same actual inputs only at each scheduled rule call.
+Raw9C..C0 history,114 yaw delta and whole-tick poses match exactly. A
+second original-AOT evaluation from those independent canonical states
+checks the private forecast response, relative orbit and all three
+angle samples. All scenarios passed; maximum orbit error9.5367514e-7.
+These are supplied camera inputs; an actual collision solver is not
+executed by these fixtures. Whole60Hz bytes remain pinned separately.
+
+The full three-worker workflow also passed four hidden/muted isolated
+story routes. Each reached replay after183 goal ticks; fresh motion counts
+were91/127/184/208, with fresh camera matrices78/92/94/106 and zero held
+matrices or drawless checked scenes. Visual acceptance remains manual.
+research/camera-display/build.log, accepted-inputs.json and the standard
+numeric/live reports tie these results to executable and case hashes.
+research/camera-velocity/ownership-after contains paired recipes/results.
+
+The fresh PGO Use build repeated all594 numeric checks and all four live
+routes with zero profile-hash mismatches. Its final binary/report hashes
+are recorded by the PGO workflow; the earlier paired ownership reports
+retain the exact copied-tool hashes they exercised.
+
+Static resource/geometry follow-up classified67 additional queue sites:
+24 heap/pool/reference counters in200F0..217A6 and43 affine-transform/
+quaternion primitive stores in28AB0..29F0C. Allocation counts, byte totals,
+reference ownership and supplied geometry are not elapsed clocks. Their
+callers' scheduling, input units and lifecycles remain separate research.
+Complete bounded original analyses are in research/reference-counters and
+research/matrix-primitives. These reviews change no original arithmetic.
+
+Next research queue: B74C0 view-offset steps at B7799/B77B3/B77DD/B7817
+and its signed/32 FOV response at B7945 remain unconfirmed candidates.
+Exploratory fixtures reach an original debug trap before the requested
+prefix checkpoint; their failures are retained. No successful native
+service return or timing fix is inferred from those incomplete runs.
+
+A possible nested B22E0->B3BA0 delta-override path was rejected by both
+frozen original-reference and candidate tools at the verified B2312
+call-target table. Raw camera-table index76 is not a valid selector in
+that caller's proved lifetime. No legacy-context guard was added without
+a valid original caller; further caller timing research stays open.
+
+Fresh unique B74C0 prefixes subsequently reproduced the view-tail candidates.
+The previous revised fixtures had reused immutable report paths and were
+rejected; only the new offsets-20261106-212125-* folders establish these
+results. Mode2 offsets starting(+1,-1) ended(+.9791667,-.9791667) at60,
+(+.8750001,-.8750001) at360 and(+.6500003,-.6500003) at1000 after5 ticks.
+Original AFE00/B5790/B5A80 publish mode2 and B5D70 mode3. The four signed
+3971C0 additions/subtractions now use the existing elapsed-time increment;
+their original zero clamps and pause behavior remain in place. Four bounded
+prefix cases await the next combined build. Mode5's separate integer FOV
+response also drifts(10325/8420/7131 from10922); its ownership fix remains open.
+
+The metadata-only audit before that source patch passed594/594 and refreshed
+the inventory to2302 open scene candidates plus171 unreviewed lowerings.
+Its manifest hash is D70A68D39EFEE99582F61E5EC8EF0AD96F212CEB05FAC91B08ABB9909ABDC85E.
+
+Completed view-offset and mode5 FOV ownership follow-up, 2026-11-06
+
+The four recenter operands passed44 schedule checks with exact60Hz bytes;
+the largest float error was1.5111e-6, within the bounded3e-6 rounding error.
+The recorded801-draw PRO SKATERS capture has mode0 and zero offsets in all
+five camera records; those recenter operators are inactive on that path.
+
+Mode5's camera+30 is both integer response history and rendered full angle.
+Its original signed/32 rounding is preserved once per logical rule. A bounded
+five-record cache samples the next original map from current scene geometry;
+it does not reconstruct earlier input or predict a future impact. Pause holds
+the displayed angle. An immediate-max display between rules cannot contaminate
+later rule history. ADFC0/B7350 reset the same five bounded histories.
+At whole phase0 rules the helper returns the original32-bit SAR increment,
+preserving the later EAX checkpoint even when the stored16-bit angle wraps.
+
+The original AOT half-angle result3432 pins full target6864 for the static
+fixture. Original canonical and prospective prefixes, bracketed by original
+memcpy save/restore, supplied independent oracles for60 scenarios and1589
+display samples. Constant velocity, acceleration, reversal, teleport, fractional
+pause/resume, transient/committed max, same-visible reset, slot4 and hitches
+all matched exactly. Two wrapped-current ABI cases also matched all eight
+GPRs, flags and angle, including masked nonfinite/FISTP input.
+
+Fresh PGO validation had zero profile-hash mismatches and passed CPU24,
+input58, audio37, clock31,704 numeric checks and four hidden/muted isolated
+routes. Each route reached replay after183 goal ticks; fresh motion counts
+were91/124/177/316 and camera matrices78/89/88/169, with zero held matrices.
+research/camera-view/accepted-fov.json locates immutable numeric/live reports,
+the60 original-map comparisons, two ABI comparisons and binary/profile hashes.
+These supplied trajectories do not execute a collision solver; visual checking
+and unreviewed timing families remain open.
+
+Next confirmed family: AE130 advances camera-shake spring0.75/damping0.85
+and duration on every scene, while its matrix application must remain per scene.
+Original ADDD0(0,10,[1,0,0]) is still active with5 ticks left after5 source
+ticks at60, but already expired at360/1000. With indefinite duration, fresh
+matrix X translation after1 source tick is0.85/-0.69018054/0.28692055 at
+60/360/1000. Matrices were rebuilt before each call, excluding accumulation.
+Original code/recipes are in research/camera-shake. Expiry tail-calls ADE60
+through camera+20C and resets the original global record; a private full-routine
+preview must not publish that reset. This is resolved by the ownership fix below.
+
+Completed camera-shake ownership follow-up, 2026-11-06
+
+AE130 now commits its original spring and duration once per rule while applying
+only the sampled shake offset to both freshly rebuilt view matrices each scene.
+All six guest position/velocity words remain canonical; ADDD0 impulse units stay
+unchanged. Private original spring previews cannot draw, decrement duration or
+reset the real camera through +20C. The final expiry draw has a bounded lease
+until the next rule, despite the original motion record already being reset.
+ADE60, ADFC0, B7350 and frame-history reset invalidate five bounded caches.
+
+Five cases pin original full-call state and whole-tick matrix bytes, including
+finite expiry, indefinite duration, pause/resume and the fifth slot. Independent
+original commit/prospective calls bracketed by original memcpy supplied48 paired
+scenarios and1262 scenes: zero/finite/indefinite duration, expiry, fractional
+pause/resume, impulse extension, same-visible reset, jitter and hitches. Every
+committed state byte and whole-tick matrix word matched. With changing bases,
+maximum matrix rounding error was1.1921e-7. Five full-rule ABI cases matched all
+eight GPRs, flags, spring fields, both matrices and shared transform exactly.
+
+The first audit's five1000Hz recipes exceeded the existing64KB recipe bound;
+their failed report/log remain retained. Reusing an original-memcpy identity
+template corrected recipe size without changing any bound or tolerance.
+The final3-worker Timing milestone passed CPU24/input58/audio37/clock31 and
+759/759 probes. Four hidden/muted isolated routes reached replay after183 ticks,
+with fresh motion91/122/171/182 and camera matrices78/87/82/182, zero held.
+The existing AEE6 profile discarded only3 changed-function hashes on this build.
+research/camera-shake/accepted-shake.json pins binaries, source/cases/profile,
+final numeric/live/workflow reports and independent ownership/ABI evidence.
+
+Inventory now retains2294 open scene candidates and171 unreviewed lowerings.
+The ten ADDD0 impulse callers retain separate scheduling obligations; preserving
+their velocity units is not a proof of every caller's delivery timing. Legacy
+B28D0 stage-relative camera pose freshness is a next research lead: B74 currently
+rule-gates that controller, whose original body also transforms local points
+through current stage matrices. Its rule cadence is already bounded correctly;
+intermediate pose ownership needs reproduction before any further source change.
+Wrap-up boundary, 2026-11-06
+
+The original B74 state48 constructor prefix pinned the correct B6670/B28D0
+table words, then stopped before the requested AE130 checkpoint at unbound
+Xbox kernel ordinal277 (guest3076EF). No B28D0 pose drift was established by
+that incomplete run. Its original constructor has a required native service
+outside this asset-free CPU context; no success stub or product workaround was
+added. The report/recipe remain in research/camera-shake/prefix-20261106-235749-2807681.
+B28D0 remains read-only research. Source/cases stay at the accepted759-check
+shake/FOV milestone; no further timing fix or build was started for wrap-up.
+
+Minigame clock audit, 2026-11-06
+
+Same verified executable and SHA256 as above. The compiled call index contains
+three gameplay frame loops: common 14D80, Tennis 1E1220 and Baseball 233DD0.
+Calls to frame start 66DC0 and waits 66E40/2A640 establish this census;
+loading/dialogue waits were kept separate from gameplay.
+
+Tennis bypassed 14F00's frame begin. It reused the last common-loop FrameStep,
+so its private player, match, pause and timer updates could run each display
+frame. 1E1287 now begins a frame; the 1E129F--1E135A rule section and the
+1E1394 global counter run on rule ticks. Private rule calls receive original
+whole-tick units, while 1EA8E0, shared scene updates and HUD drawing remain
+in the display loop. Its shared utility update and FB4D0 countdown also use
+rule ticks.
+
+Baseball also bypassed frame begin and waits directly through 2A640. Its
+233DE8 entry now begins a frame and its 233E49 return identifies a gameplay
+wait, allowing the selected display rate. Its input and 232BF0 rule dispatch
+stay at 60 Hz; 233CD0 lighting and 232C10 rendering still run every scene.
+The host retains the active loop identity and resets the clock when switching
+between the three loops. Existing loading/dialogue waits keep their pacing.
+
+Hidden/muted isolated storage runs covered all twelve party selections:
+Race, Fight, Target, Billiards, Bowling, Golf, Boat, Shot, Dogfight, Soccer,
+Baseball and Tennis. Every 360 Hz window completed 180 rule ticks in about
+three seconds (2.996--3.002 seconds). Bowling and Soccer did not sustain the
+360 FPS cap in these scenes; their game clocks still kept the original pace.
+Tennis and Baseball additionally completed their 60 Hz control windows in
+2.999 and 3.014 seconds, with 180 and 181 rendered-frame records. Their
+360 Hz windows contained 1080 and 1075 records over the same three seconds.
+Hardware: AMD Ryzen 5 5600X / NVIDIA GeForce RTX 5060 Ti, 1x, VSync off.
+Reports, exact routes and per-frame counters: build/checks/minigame-timing/;
+minigames-360.json indexes the twelve windows. This is clock/update ownership
+coverage with short representative scenes, not a claim about every match state.
+
+Bowling curve icon: original 1A4B80 is drawing code and also updates the
+signed angle at 7E9360. At 1A4C54, its original per-tick integer turn now uses
+the common quantized elapsed-time increment. Both curve directions passed
+22 schedule checks, including 60--1000 Hz, uneven intervals and hitches.
+The original 60 Hz path is unchanged. The new cases in timing_issues.json
+use the supplied frame-1794022328055-72578712200 model and the original
+422658 character speed table; they stop at actual sprite submission 75400.

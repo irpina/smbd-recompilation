@@ -10,7 +10,7 @@
 
 An unofficial native version of the original Xbox game for Windows, built around accurate gameplay, original presentation, and enhancements. This fan project is independent of SEGA. You must provide your own US Xbox game disc image. Original game files are not distributed here.
 
-**0.3.0 is the latest public development release.** Bugs, slowdowns, and stops in untested game modes are still possible. Linux and macOS are planned targets; the current game build requires Windows x64.
+**0.4.0 is the latest public development release.** Bugs, slowdowns, and stops in untested game modes are still possible. Linux and macOS are planned targets; the current game build requires Windows x64.
 
 ## AI disclosure
 
@@ -24,21 +24,16 @@ OpenAI Codex has assisted with development and research. Changes are checked usi
 
 ## Current status
 
-### Changes in 0.3.0
+### Changes in 0.4.0
 
-- Fixed overlay sizing issues at their root. No more gaps within menus!
-- Fixed Monkey Baseball crashes. Open an issue if any other minigame is giving you trouble :)
-- Addressed a few more ultrawide issues.
-- Fixed delayed subtitles in FMVs. Pretty sure this was a regression. Sorry about that :(
-- Addressed a handful of egregious timing issues at high frame rates.
-- The mouse cursor now automatically hides after a couple seconds of inactivity.
-- Polished the installer's UI.
+- Implemented a slew of performance optimizations. Enjoy much higher performance :3
+- Addressed more timing issues across the game. Monkey Baseball and Monkey Tennis now behave correctly at higher refresh rates.
+- Added a render distance override to Enhancements. It's recommended to use this enhancement at higher internal resolutions.
 
 ### Known issues
 
-- Subpar performance above 60 Hz. 0.4.0 will provide major optimizations.
-- Timing issues above 60 Hz. Fixes are ongoing.
-- Your antivirus software may flag the setup executable as a virus; it's a false positive.
+- Timing issues in replays.
+- Your antivirus software may flag the setup executable as a virus. It's a false positive.
 - Other issues that I'm sure I'll find.
 
 ### What works
@@ -66,7 +61,7 @@ OpenAI Codex has assisted with development and research. Changes are checked usi
 
 You need a Direct3D 11-capable graphics card and an XISO image of the **US Xbox release of Super Monkey Ball Deluxe**. A full raw-disc dump must first be converted to XISO. The executable is checked against [the supported-target registry](knowledge/supported_target.json).
 
-**[Download the 0.3.0 Windows installer](https://github.com/timftw21/smbd-recompilation/releases/download/v0.3.0/smbd-0.3.0-windows-x64-setup.exe)** · [Release notes and SHA-256 checksum](https://github.com/timftw21/smbd-recompilation/releases/tag/v0.3.0)
+**[Download the 0.4.0 Windows installer](https://github.com/timftw21/smbd-recompilation/releases/download/v0.4.0/smbd-0.4.0-windows-x64-setup.exe)** · [Release notes and SHA-256 checksum](https://github.com/timftw21/smbd-recompilation/releases/tag/v0.4.0)
 
 1. Run the installer and select your US Xbox XISO image.
 2. Choose an installation folder. You can keep a copy of the image with the game and create a desktop shortcut.
@@ -111,7 +106,7 @@ Use the bottom row to close settings, restart the running game, restore defaults
 - **General:** Choose a refresh limit or Unlimited, and toggle the frame-rate display. V-sync can impose an additional limit.
 - **Audio:** Adjust master volume, mute, or mute when the window loses focus.
 - **Graphics:** Set aspect ratio, fullscreen, and V-sync.
-- **Enhancements:** Choose 1×–4× internal resolution, FXAA or supported MSAA levels, and anisotropic filtering up to 16×. Resolution, antialiasing, filtering, and aspect ratio apply immediately.
+- **Enhancements:** Choose 1×–4× internal resolution, FXAA or supported MSAA levels, and anisotropic filtering up to 16×. The render distance override is recommended at higher internal resolutions. These settings and aspect ratio apply immediately.
 - **Controls:** Rebind keyboard keys, controller buttons, and stick directions, clear bindings, or restore the defaults.
 - **Diagnostics:** Capture a frame or record a slowdown.
 

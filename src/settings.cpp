@@ -42,6 +42,7 @@ void Settings::load(const std::filesystem::path& path) {
         else if(name=="mute_on_focus_loss") mute_on_focus_loss=number!=0;
         else if(name=="vsync") vsync=number!=0;
         else if(name=="fullscreen") fullscreen=number!=0;
+        else if(name=="unlimited_render_distance") unlimited_render_distance=number!=0;
         else if(name=="volume") volume=std::clamp(number,0,100);
         else if(name=="aspect") aspect=std::clamp(number,0,2);
         else if(name=="resolution") resolution=std::clamp(number,1,4);
@@ -55,8 +56,8 @@ void Settings::load(const std::filesystem::path& path) {
     }
 }
 void Settings::save(const std::filesystem::path& path) const {
-    auto text=std::format("executable={}\ndisc={}\nshow_fps={}\nvolume={}\nmuted={}\nmute_on_focus_loss={}\naspect={}\nvsync={}\nfullscreen={}\nresolution={}\nrefresh_rate={}\nantialiasing={}\nanisotropy={}\n",
-        executable.data(),disc.data(),int(show_fps),volume,int(muted),int(mute_on_focus_loss),aspect,int(vsync),int(fullscreen),resolution,refresh_rate,antialiasing,anisotropy);
+    auto text=std::format("executable={}\ndisc={}\nshow_fps={}\nvolume={}\nmuted={}\nmute_on_focus_loss={}\naspect={}\nvsync={}\nfullscreen={}\nresolution={}\nrefresh_rate={}\nantialiasing={}\nanisotropy={}\nunlimited_render_distance={}\n",
+        executable.data(),disc.data(),int(show_fps),volume,int(muted),int(mute_on_focus_loss),aspect,int(vsync),int(fullscreen),resolution,refresh_rate,antialiasing,anisotropy,int(unlimited_render_distance));
     for(unsigned i=0;i<control_actions.size();++i) text+=std::format("key_{}={}\npad_{}={}\n",control_actions[i].id,bindings[i].keyboard,control_actions[i].id,bindings[i].gamepad);
     if(text.find('\r')!=std::string::npos || std::string_view(executable.data()).find('\n')!=std::string_view::npos ||
        std::string_view(disc.data()).find('\n')!=std::string_view::npos) throw std::runtime_error("Game paths cannot contain line breaks");
@@ -80,7 +81,11 @@ std::string check_presentation(const std::filesystem::path& directory,const std:
     std::filesystem::create_directories(directory);
     unsigned checks=0;
     const auto require=[&](bool condition) {++checks;if(!condition) throw std::runtime_error(std::format("Completed-frame presentation check {} failed",checks));};
-    Settings settings;require(settings.refresh_rate==60);
+    Settings settings;require(settings.refresh_rate==60 && !settings.unlimited_render_distance);
+    for(bool unlimited:{true,false}) {
+        settings.unlimited_render_distance=unlimited;settings.save(directory/"settings.cfg");
+        Settings restored;restored.load(directory/"settings.cfg");require(restored.unlimited_render_distance==unlimited);
+    }
     for(int rate:{0,30,144,360,1000}) {
         settings.refresh_rate=rate;settings.save(directory/"settings.cfg");
         Settings restored;restored.load(directory/"settings.cfg");require(restored.refresh_rate==rate);
@@ -121,6 +126,23 @@ std::string check_presentation(const std::filesystem::path& directory,const std:
             require(next.rgba!=expected.rgba);
             save_png(expected,directory/std::format("complete-{}x-aspect-{}.png",scale,aspect));
         }
+        // Different colours at each mip make live LOD changes observable,
+        // including restoring a pipeline prepared before the option changed.
+        const std::array<std::uint32_t,5> mip_pixels{0xFFFF0000,0xFFFF0000,0xFFFF0000,0xFFFF0000,0xFF0000FF};
+        const auto texture=renderer.upload({2,2,TextureFormat::argb8,std::as_bytes(std::span(mip_pixels)),2});
+        RenderState state;state.textures[0]=texture;state.texture_modes[0]=1;
+        state.texture_filter[0]=0x02060000;state.texture_control[0]=0x04004000;
+        state.final_inputs={0x00000008,0x00001800};
+        std::array<Vertex,6> quad;
+        constexpr Float4 positions[]={{-1,-1,0,1},{1,-1,0,1},{1,1,0,1},{-1,-1,0,1},{1,1,0,1},{-1,1,0,1}};
+        for(unsigned i=0;i<quad.size();++i) {quad[i].position=positions[i];quad[i].uv[0]={.5f,.5f,0,1};}
+        for(bool unlimited:{false,true,false}) {
+            renderer.image_quality(scale,0,0,unlimited);renderer.set_target(0);renderer.prepare(state);
+            renderer.begin();renderer.draw(state,quad);renderer.end();const auto image=renderer.readback();
+            require(renderer.stats().unlimited_render_distance==unlimited);
+            require(image.rgba[0]==std::byte(unlimited?255:0) && image.rgba[2]==std::byte(unlimited?0:255));
+        }
+        renderer.release_texture(texture);
         require(SDL_SetWindowSize(window.get(),120,90));SDL_PumpEvents();
         require(renderer.display(true));const auto resized=renderer.read_display();renderer.present(false);
         require(resized.width==120 && resized.height==90);
@@ -151,10 +173,13 @@ std::string check_presentation(const std::filesystem::path& directory,const std:
             if(frames%24==0 && frames/24<=options.size()) {
                 const auto& option=options[frames/24-1];
                 if(option[1]<4 || renderer.supports_msaa(1U<<(option[1]-3))) {
-                    renderer.image_quality(option[0],option[1],option[2]);running->aspect_ratio(option[3]);
+                    const bool unlimited=(frames/24)%2!=0;
+                    renderer.image_quality(option[0],option[1],option[2],unlimited);running->aspect_ratio(option[3]);
+                    running->unlimited_render_distance(unlimited);
                     renderer.aspect_ratio(option[3]==2?21.0f/9:option[3]==1?16.0f/9:4.0f/3);
                     const auto stats=renderer.stats();
                     require(stats.resolution_scale==option[0] && stats.antialiasing==option[1] && stats.anisotropy==option[2]);
+                    require(stats.unlimited_render_distance==unlimited);
                     require(memory.load<std::uint8_t>(0x6C934C)==(option[3]!=0));
                     require(memory.load<std::uint32_t>(0x402428)==(option[3]==2?std::bit_cast<std::uint32_t>(21.0f/9):0x3FE38E39U));
                     const auto layout=std::bit_cast<std::int8_t>(memory.load<std::uint8_t>(0x73F190));
@@ -475,7 +500,10 @@ void SettingsUi::draw(bool playing,bool recording,double fps,const std::function
                 int filter=0;for(int i=0;i<6;++i) if(settings_.anisotropy==values[i]) filter=i;
                 label("Anisotropic filtering");
                 if(ImGui::Combo("##Anisotropic filtering",&filter,filters,6)) {settings_.anisotropy=values[filter];changed=true;}
-                help("Keeps textures sharper when viewed at an angle. Original preserves the game's filtering settings. Higher values use more GPU power. Applies immediately.");break;
+                help("Keeps textures sharper when viewed at an angle. Original preserves the game's filtering settings. Higher values use more GPU power. Applies immediately.");
+                ImGui::SeparatorText("RENDER DISTANCE");
+                changed|=ImGui::Checkbox("Render distance override",&settings_.unlimited_render_distance);
+                help("Removes the original far cutoff and keeps full-resolution textures at every distance. Recommended at higher internal resolutions. May reduce performance and increase texture shimmer. Applies immediately.");break;
             }
             case 5: {
                 bool controller=binding_controller_;

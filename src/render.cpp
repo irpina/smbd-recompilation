@@ -14,6 +14,7 @@
 #include <cstring>
 #include <format>
 #include <map>
+#include <optional>
 #include <stdexcept>
 
 using Microsoft::WRL::ComPtr;
@@ -170,8 +171,7 @@ struct alignas(16) Constants {
     std::array<Float4,4> bump_matrices;
     std::array<std::uint32_t,4> gaussian_scale; // Zero disables; otherwise physical texels per guest texel.
 };
-struct alignas(16) ProgramUniforms {
-    VertexConstants constants;
+struct alignas(16) ProgramSettings {
     Float4 viewport,fog;
     std::array<Float4,4> texture_scales;
     std::array<std::uint32_t,16> input_formats{};
@@ -179,6 +179,12 @@ struct alignas(16) ProgramUniforms {
     std::array<std::array<std::uint32_t,4>,4> fixed_texgen{};
     std::array<std::uint32_t,4> fixed_matrices{};
 };
+struct ProgramUniforms {
+    const VertexConstants& constants;
+    ProgramSettings settings;
+};
+constexpr auto program_uniform_bytes=sizeof(VertexConstants)+sizeof(ProgramSettings);
+static_assert(sizeof(VertexConstants)==192*16 && sizeof(ProgramSettings)==16*16);
 struct AttributeFormat {DXGI_FORMAT native;unsigned bytes,fetched;};
 AttributeFormat attribute_format(std::uint32_t format) {
     const unsigned type=format&15,size=(format>>4)&15;
@@ -297,9 +303,12 @@ struct Renderer::Impl {
     std::array<Bytes,7> fixed_signatures;
     std::array<ComPtr<ID3D11InputLayout>,7> fixed_layouts;
     ComPtr<ID3D11InputLayout> layout;
-    ComPtr<ID3D11Buffer> vertices, index_buffer, factor_buffer, program_constants;
+    ComPtr<ID3D11Buffer> vertices, current_vertices, index_buffer, factor_buffer, program_constants;
+    ProgramVertex last_current_vertex{};
+    bool current_vertex_uploaded=false,current_vertex_bound=false;
     Constants last_factors{};
-    ProgramUniforms last_program_uniforms{};
+    VertexConstants last_program_constants{};
+    ProgramSettings last_program_settings{};
     bool factors_uploaded=false,program_uniforms_uploaded=false;
     UINT vertex_cursor=0,index_cursor=0;
     ComPtr<ID3D11Buffer> launch_constants, launch_inputs, launch_readback;
@@ -338,6 +347,7 @@ struct Renderer::Impl {
     std::size_t target_bytes=0;
     std::size_t target_limit=256*1024*1024;
     unsigned samples=1,msaa_supported=0,antialiasing_quality=0,anisotropy=0;
+    bool unlimited_render_distance=false;
     std::unique_ptr<FrameAntialiasing> antialiasing;
     std::unique_ptr<MultisampleCopy> multisample_copy;
     HWND window=nullptr;
@@ -370,7 +380,26 @@ struct Renderer::Impl {
         ComPtr<ID3D11RasterizerState> raster;
         std::array<ComPtr<ID3D11SamplerState>, 4> samplers;
     };
-    std::map<PipelineKey, Pipeline> pipelines;
+    static_assert(std::is_nothrow_move_constructible_v<Pipeline>);
+    struct DrawBindings {
+        ID3D11InputLayout* layout;
+        D3D11_PRIMITIVE_TOPOLOGY topology;
+        ID3D11VertexShader* vertex;
+        ID3D11PixelShader* pixel;
+        ID3D11BlendState* blend;
+        ID3D11DepthStencilState* depth;
+        ID3D11RasterizerState* raster;
+        UINT stencil_reference;
+        std::array<ID3D11ShaderResourceView*,12> views;
+        std::array<ID3D11SamplerState*,4> samplers;
+        std::array<LONG,4> scissor;
+    };
+    std::optional<DrawBindings> bound_draw;
+    static constexpr unsigned pipeline_limit=1024;
+    std::map<PipelineKey,std::uint32_t> pipeline_keys;
+    decltype(pipeline_keys)::iterator last_pipeline=pipeline_keys.end();
+    std::vector<Pipeline> pipelines;
+    std::uint64_t first_pipeline=1;
     struct Program {
         VertexProgram key;
         bool launch;
@@ -386,10 +415,23 @@ struct Renderer::Impl {
     struct StreamLayout {
         std::uint32_t program;VertexLayout attributes,native_attributes;
         std::uint32_t repacked=0;
+        std::array<unsigned,16> required{},fetched{},alignments{};
+        unsigned stream_count=0;
+        bool uses_current=false;
         ComPtr<ID3D11InputLayout> native;
     };
     std::vector<StreamLayout> stream_layouts;
-    struct StreamDraw {const StreamLayout& layout;std::span<const VertexStream> streams;const ProgramVertex& current;};
+    struct StreamUpload {
+        std::array<UINT,16> offsets,strides,sizes;
+        UINT size,offset;
+        bool uses_current;
+    };
+    struct PreparedStreams {
+        const StreamLayout& layout;
+        const StreamDraw& draw;
+        const StreamUpload& upload;
+        const VertexConstants*& bound_constants;
+    };
     std::vector<ComPtr<ID3D11ShaderResourceView>> textures{1};
     std::vector<unsigned> texture_dimensions{0};
     std::vector<std::size_t> texture_sizes{0};
@@ -423,6 +465,7 @@ struct Renderer::Impl {
         textures[id].Reset();texture_dimensions[id]=0;free_textures.push_back(id);
     }
     static constexpr UINT max_vertices = 32768, max_indices = max_vertices * 6;
+    static constexpr UINT vertex_capacity=max_vertices*sizeof(ProgramVertex);
     std::byte* append_buffer(ID3D11Buffer* buffer,UINT capacity,UINT& cursor,std::size_t size,UINT& offset) {
         if(!size || size>capacity) throw std::runtime_error("Upload exceeds dynamic buffer storage");
         offset=(cursor+15)&~UINT(15);
@@ -439,6 +482,7 @@ struct Renderer::Impl {
         const auto result=shader_binary(kind,program);stats.shader_compilations+=result.compiled;return result.bytes;
     }
     Impl(std::uint32_t w, std::uint32_t h, bool warp, bool debug,unsigned scale) : width(w), height(h),resolution_scale(scale) {
+        pipelines.reserve(pipeline_limit);
         if(scale<1 || scale>4) throw std::runtime_error("Internal resolution must be 1x..4x");
         extent(w, h);
         const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0};
@@ -503,10 +547,11 @@ struct Renderer::Impl {
             desc.BindFlags = bind; desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
             checked(device->CreateBuffer(&desc, nullptr, &output), "Dynamic buffer");
         };
-        buffer(max_vertices * sizeof(ProgramVertex), D3D11_BIND_VERTEX_BUFFER, vertices);
+        buffer(vertex_capacity, D3D11_BIND_VERTEX_BUFFER, vertices);
+        buffer(sizeof(ProgramVertex), D3D11_BIND_VERTEX_BUFFER, current_vertices);
         buffer(max_indices * sizeof(std::uint32_t), D3D11_BIND_INDEX_BUFFER, index_buffer);
         buffer(sizeof(Constants), D3D11_BIND_CONSTANT_BUFFER, factor_buffer);
-        buffer(sizeof(ProgramUniforms),D3D11_BIND_CONSTANT_BUFFER,program_constants);
+        buffer(program_uniform_bytes,D3D11_BIND_CONSTANT_BUFFER,program_constants);
         buffer(32,D3D11_BIND_CONSTANT_BUFFER,clear_constants);
         converted.reserve(max_indices);
         for(auto& timing:timings) {
@@ -570,7 +615,10 @@ struct Renderer::Impl {
         frame_acquired=true;return true;
     }
     void draw(const RenderState&, Bytes, std::size_t, std::span<const std::uint32_t>,
-              const Program* = nullptr, const ProgramUniforms* = nullptr,const StreamDraw* = nullptr);
+              const Program* = nullptr, ProgramUniforms* = nullptr,const PreparedStreams* = nullptr);
+    StreamUpload plan_streams(const StreamDraw&) const;
+    void pack_streams(const StreamDraw&,const StreamUpload&,std::byte*) const;
+    void draw_prepared_streams(const StreamDraw&,const StreamUpload&,const VertexConstants*&);
     FrameTarget make_target(std::uint32_t w,std::uint32_t h,SurfaceColor color_format=SurfaceColor::rgba8,
                            SurfaceDepth depth_format=SurfaceDepth::z24s8,const FrameTarget* shared=nullptr,unsigned sample_count=0,unsigned scale=0) {
         extent(w,h);
@@ -623,6 +671,7 @@ struct Renderer::Impl {
         auto output=rtv.Get();context->OMSetRenderTargets(1,&output,dsv.Get());
     }
     void unbind_textures() {
+        bound_draw.reset();
         std::array<ID3D11ShaderResourceView*,12> empty{};
         context->PSSetShaderResources(0,static_cast<UINT>(empty.size()),empty.data());
     }
@@ -672,15 +721,16 @@ void Renderer::aspect_ratio(float aspect) {
     impl_->display_aspect=aspect;
 }
 bool Renderer::supports_msaa(unsigned samples) const {return samples>=2 && samples<=8 && std::has_single_bit(samples) && (impl_->msaa_supported&samples)!=0;}
-void Renderer::enhancements(unsigned quality,unsigned anisotropy) {
-    image_quality(impl_->resolution_scale,quality,anisotropy);
+void Renderer::enhancements(unsigned quality,unsigned anisotropy,bool unlimited_render_distance) {
+    image_quality(impl_->resolution_scale,quality,anisotropy,unlimited_render_distance);
 }
-void Renderer::image_quality(unsigned scale,unsigned quality,unsigned anisotropy) {
+void Renderer::image_quality(unsigned scale,unsigned quality,unsigned anisotropy,bool unlimited_render_distance) {
     auto& r=*impl_;
     if(r.recording) throw std::runtime_error("Change image quality between completed frames.");
     if(scale<1 || scale>4 || quality>6 || anisotropy>16 || (anisotropy && !std::has_single_bit(anisotropy)))
         throw std::runtime_error("Invalid internal resolution or image quality.");
-    if(scale==r.resolution_scale && quality==r.antialiasing_quality && anisotropy==r.anisotropy) return;
+    if(scale==r.resolution_scale && quality==r.antialiasing_quality && anisotropy==r.anisotropy &&
+       unlimited_render_distance==r.unlimited_render_distance) return;
     const unsigned samples=quality>=4?1U<<(quality-3):1U;
     if(samples>1 && !supports_msaa(samples)) throw std::runtime_error("This MSAA level is unavailable on your graphics device.");
     const bool rebuild=scale!=r.resolution_scale || samples!=r.samples;
@@ -735,7 +785,11 @@ void Renderer::image_quality(unsigned scale,unsigned quality,unsigned anisotropy
     }
     if(replace_aa) r.antialiasing=std::move(aa);
     r.antialiasing_quality=quality;r.anisotropy=anisotropy;
+    r.unlimited_render_distance=unlimited_render_distance;
+    r.first_pipeline+=r.pipelines.size();
     r.pipelines.clear();
+    r.pipeline_keys.clear();
+    r.last_pipeline=r.pipeline_keys.end();
 }
 std::uint32_t Renderer::create_target(std::uint32_t width,std::uint32_t height,SurfaceColor color,SurfaceDepth depth,std::uint32_t shared_color,bool reuse_slot) {
     auto& r=*impl_;extent(width,height);
@@ -1175,14 +1229,19 @@ std::uint32_t Renderer::upload(const TextureData& texture,bool reuse_slot) {
     ++r.stats.texture_uploads;r.stats.texture_upload_bytes+=texture.bytes.size();
     return r.store_texture(std::move(view),texture.cubemap?3U:texture.depth>1?2U:1U,resident_bytes,reuse_slot);
 }
-void Renderer::prepare(const RenderState& state) {
+std::uint64_t Renderer::prepare(const RenderState& state) {
     auto& r = *impl_;
     if (r.recording) throw std::runtime_error("Prepare pipelines before frame submission");
     validate_fragment(state);
     const auto key = pipeline_key(state);
-    if (r.pipelines.contains(key)) return;
+    if(r.last_pipeline!=r.pipeline_keys.end() && r.last_pipeline->first==key)
+        return r.first_pipeline+r.last_pipeline->second;
+    if(const auto found=r.pipeline_keys.find(key);found!=r.pipeline_keys.end()) {
+        r.last_pipeline=found;
+        return r.first_pipeline+found->second;
+    }
     ++r.stats.state_misses;
-    if (r.pipelines.size() >= 1024) throw std::runtime_error("Pipeline cache limit reached");
+    if (r.pipelines.size() >= Impl::pipeline_limit) throw std::runtime_error("Pipeline cache limit reached");
     Impl::Pipeline pipeline;
     D3D11_BLEND_DESC blend{};
     auto& output = blend.RenderTarget[0];
@@ -1246,10 +1305,14 @@ void Renderer::prepare(const RenderState& state) {
         int bias=filter&0x1FFF;if(bias&0x1000) bias-=0x2000;
         sampler.MipLODBias=mip?std::clamp(bias/256.0f,D3D11_MIP_LOD_BIAS_MIN,D3D11_MIP_LOD_BIAS_MAX):0;
         sampler.MinLOD=mip?float((control>>18)&0xFFF)/256:0;sampler.MaxLOD=mip?float((control>>6)&0xFFF)/256:0;
+        if(r.unlimited_render_distance) sampler.MinLOD=sampler.MaxLOD=0;
         checked(r.device->CreateSamplerState(&sampler, &pipeline.samplers[i]), "Sampler state");
         ++r.stats.sampler_misses;
     }
-    r.pipelines.emplace(key, std::move(pipeline));
+    const auto index=static_cast<std::uint32_t>(r.pipelines.size());
+    r.last_pipeline=r.pipeline_keys.emplace(key,index).first;
+    r.pipelines.push_back(std::move(pipeline));
+    return r.first_pipeline+index;
 }
 std::uint32_t Renderer::prepare_program(const VertexProgram& program,bool launch) {
     auto& r=*impl_;
@@ -1335,6 +1398,14 @@ std::uint32_t Renderer::prepare_layout(std::uint32_t program,const VertexLayout&
             auto& offset=offsets[attribute.stream];offset=(offset+alignment-1)&~(alignment-1);
             attribute.offset=offset;offset+=format.fetched;
         }
+        if(attribute.stream==16) layout.uses_current=true;
+        else {
+            const auto stream=attribute.stream;
+            layout.stream_count=std::max(layout.stream_count,stream+1);
+            layout.required[stream]=std::max(layout.required[stream],attributes[i].offset+format.bytes);
+            layout.fetched[stream]=std::max(layout.fetched[stream],attribute.offset+format.fetched);
+            layout.alignments[stream]=std::max(layout.alignments[stream],std::min(format.fetched,4U));
+        }
         inputs[i]={"TEXCOORD",i,format.native,attribute.stream,attribute.stream==16?i*16:attribute.offset,D3D11_INPUT_PER_VERTEX_DATA,0};
     }
     const auto& code=r.programs[program-1].signature;
@@ -1415,6 +1486,9 @@ void Renderer::clear_buffers(std::uint32_t flags,std::uint32_t argb,float depth,
 void Renderer::begin(std::uint32_t argb, float depth, bool clear_target) {
     auto& r = *impl_;
     if (r.recording) throw std::runtime_error("Frame already begun");
+    // Presentation and other passes share this context between draw batches.
+    r.bound_draw.reset();
+    r.current_vertex_bound=false;
     if(clear_target) clear(argb, depth);
     r.stats.draws = r.stats.vertices = r.stats.vertex_bytes = 0; r.stats.gpu_ms = 0; r.stats.gpu_timing_valid = false;
     r.collect_timings();r.timing_index=static_cast<unsigned>(r.timings.size());++r.frame_id;
@@ -1452,39 +1526,139 @@ void Renderer::draw_program(const RenderState& state,std::uint32_t program,const
     default:throw std::runtime_error(std::format("Unsupported NV2A fog mode 0x{:X}",state.fog_mode));
     }
     const bool absolute=state.fog_mode==0x0802 || state.fog_mode==0x0803 || state.fog_mode==0x0804;
-    ProgramUniforms uniforms{constants,{2.0f/r.width,2.0f/r.height,1/view.depth_scale,view.subpixel_bias},
-        {state.fog_parameters[0],state.fog_parameters[1],float(mode),state.fog_enable?(absolute?2.0f:1.0f):0.0f},view.texture_scales};
+    ProgramUniforms uniforms{constants,{{2.0f/r.width,2.0f/r.height,1/view.depth_scale,view.subpixel_bias},
+        {state.fog_parameters[0],state.fog_parameters[1],float(mode),state.fog_enable?(absolute?2.0f:1.0f):0.0f},view.texture_scales}};
     r.draw(state,std::as_bytes(vertices),vertices.size(),indices,&r.programs[program-1],&uniforms);
 }
 void Renderer::draw_streams(const RenderState& state,std::uint32_t layout,const VertexConstants& constants,const ProgramView& view,
                             std::span<const VertexStream> streams,const ProgramVertex& current,std::uint32_t count,
                             std::span<const std::uint32_t> indices) {
+    const StreamDraw draw{state,constants,view,streams,current,layout,count,indices};
+    draw_streams(std::span(&draw,1));
+}
+Renderer::Impl::StreamUpload Renderer::Impl::plan_streams(const StreamDraw& draw) const {
+    if(!draw.layout || draw.layout>stream_layouts.size() || draw.streams.size()>16)
+        throw std::runtime_error("Native vertex streams were not prepared");
+    if(!draw.count || draw.count>max_vertices || draw.indices.size()>max_vertices)
+        throw std::runtime_error("Draw exceeds bounded vertex/index buffers");
+    const auto& layout=stream_layouts[draw.layout-1];
+    StreamUpload upload{};
+    if(draw.streams.size()<layout.stream_count) throw std::runtime_error("Missing vertex attribute stream");
+    upload.uses_current=layout.uses_current;
+    const auto& required=layout.required;
+    const auto& fetched=layout.fetched;
+    const auto& alignments=layout.alignments;
+    std::size_t total=0;
+    for(unsigned i=0;i<draw.streams.size();++i) if(required[i]) {
+        const auto& source=draw.streams[i];
+        if(source.stride>2048 || (source.stride && required[i]>source.stride) ||
+            source.bytes.size()<(draw.count-1)*source.stride+required[i]) throw std::runtime_error("Vertex stream stride or storage is too small");
+        total=(total+15)&~std::size_t(15);
+        upload.offsets[i]=static_cast<UINT>(total);
+        const auto stride=(layout.repacked&(1U<<i))?fetched[i]:std::max(source.stride,fetched[i]);
+        upload.strides[i]=source.stride?(stride+alignments[i]-1)&~(alignments[i]-1):0;
+        upload.sizes[i]=source.stride?draw.count*upload.strides[i]:fetched[i];
+        total+=upload.sizes[i];
+    }
+    if(total>vertex_capacity) throw std::runtime_error("Native vertex streams exceed upload storage");
+    upload.size=static_cast<UINT>(total);
+    return upload;
+}
+void Renderer::Impl::pack_streams(const StreamDraw& draw,const StreamUpload& upload,std::byte* destination) const {
+    const auto& layout=stream_layouts[draw.layout-1];
+    for(unsigned i=0;i<draw.streams.size();++i) if(const auto size=upload.sizes[i]) {
+        const auto& source=draw.streams[i];
+        auto* output=destination+upload.offsets[i];
+        const auto stride=upload.strides[i];
+        const auto copied=std::min<std::size_t>(size,source.bytes.size());
+        if(layout.repacked&(1U<<i)) {
+            struct Copy {unsigned source,destination,size;};
+            std::array<Copy,16> copies{};unsigned count=0;
+            for(unsigned a=0;a<layout.attributes.size();++a) {
+                const auto& attribute=layout.attributes[a];
+                if(attribute.stream==i) copies[count++]={attribute.offset,layout.native_attributes[a].offset,attribute_format(attribute.format).bytes};
+            }
+            std::memset(output,0,size);
+            for(std::size_t n=0;n<(source.stride?draw.count:1);++n)
+                for(const auto& copy:std::span(copies).first(count))
+                    std::memcpy(output+n*stride+copy.destination,source.bytes.data()+n*source.stride+copy.source,copy.size);
+        } else if(!source.stride || stride==source.stride) {
+            std::memcpy(output,source.bytes.data(),copied);if(copied<size) std::memset(output+copied,0,size-copied);
+        } else for(std::size_t n=0;n<draw.count;++n) {
+            const auto bytes=std::min<std::size_t>(source.stride,source.bytes.size()-n*source.stride);
+            std::memcpy(output+n*stride,source.bytes.data()+n*source.stride,bytes);
+            std::memset(output+n*stride+bytes,0,stride-bytes);
+        }
+    }
+}
+void Renderer::draw_streams(std::span<const StreamDraw> draws) {
     auto& r=*impl_;
-    if(!layout || layout>r.stream_layouts.size() || streams.size()>16) throw std::runtime_error("Native vertex streams were not prepared");
+    const VertexConstants* bound_constants=nullptr;
+    while(!draws.empty()) {
+        std::array<Impl::StreamUpload,32> uploads;
+        std::size_t count=0;
+        {
+            PerfScope scope(r.profile,PerfPhase::buffer_upload);
+            UINT total=0;
+            for(;count<std::min(draws.size(),uploads.size());++count) {
+                auto upload=r.plan_streams(draws[count]);
+                const auto offset=(total+15)&~UINT(15);
+                if(upload.size) {
+                    if(upload.size>Impl::vertex_capacity-offset) break;
+                    upload.offset=offset;
+                    total=offset+upload.size;
+                }
+                uploads[count]=upload;
+            }
+            if(total) {
+                UINT base=0;
+                auto* destination=r.append_buffer(r.vertices.Get(),Impl::vertex_capacity,r.vertex_cursor,total,base);
+                for(std::size_t i=0;i<count;++i) if(auto& upload=uploads[i];upload.size) {
+                    r.pack_streams(draws[i],upload,destination+upload.offset);
+                    for(auto& offset:upload.offsets) offset+=base+upload.offset;
+                    r.stats.vertex_bytes+=upload.size;
+                }
+                r.context->Unmap(r.vertices.Get(),0);
+            }
+        }
+        // Submit this chunk before a subsequent upload can discard its storage.
+        for(std::size_t i=0;i<count;++i) r.draw_prepared_streams(draws[i],uploads[i],bound_constants);
+        draws=draws.subspan(count);
+    }
+}
+void Renderer::Impl::draw_prepared_streams(const StreamDraw& source,const StreamUpload& upload,const VertexConstants*& bound_constants) {
+    const auto& state=source.state;
+    const auto& view=source.view;
     if(!std::isfinite(view.depth_scale) || view.depth_scale<=0) throw std::runtime_error("Invalid vertex depth scale");
-    const auto& prepared=r.stream_layouts[layout-1];
+    const auto& prepared=stream_layouts[source.layout-1];
     unsigned mode=0;
     if(state.fog_enable) switch(state.fog_mode) {
     case 0x2601:case 0x0804:mode=0;break;case 0x0800:case 0x0802:mode=1;break;case 0x0801:case 0x0803:mode=2;break;
     default:throw std::runtime_error(std::format("Unsupported NV2A fog mode 0x{:X}",state.fog_mode));
     }
     const bool absolute=state.fog_mode==0x0802 || state.fog_mode==0x0803 || state.fog_mode==0x0804;
-    ProgramUniforms uniforms{constants,{2.0f/r.width,2.0f/r.height,1/view.depth_scale,view.subpixel_bias},
-        {state.fog_parameters[0],state.fog_parameters[1],float(mode),state.fog_enable?(absolute?2.0f:1.0f):0.0f},view.texture_scales};
-    for(unsigned i=0;i<16;++i) uniforms.input_formats[i]=prepared.attributes[i].stream==16?0:prepared.attributes[i].format;
-    const Impl::StreamDraw source{prepared,streams,current};
-    r.draw(state,{},count,indices,&r.programs[prepared.program-1],&uniforms,&source);
+    ProgramUniforms uniforms{source.constants,{{2.0f/width,2.0f/height,1/view.depth_scale,view.subpixel_bias},
+        {state.fog_parameters[0],state.fog_parameters[1],float(mode),state.fog_enable?(absolute?2.0f:1.0f):0.0f},view.texture_scales}};
+    for(unsigned i=0;i<16;++i) uniforms.settings.input_formats[i]=prepared.attributes[i].stream==16?0:prepared.attributes[i].format;
+    const PreparedStreams input{prepared,source,upload,bound_constants};
+    draw(state,{},source.count,source.indices,&programs[prepared.program-1],&uniforms,&input);
 }
 void Renderer::Impl::draw(const RenderState& state,Bytes vertex_bytes,std::size_t vertex_count,
-                          std::span<const std::uint32_t> input_indices,const Program* program,const ProgramUniforms* uniforms,const StreamDraw* streams) {
+                          std::span<const std::uint32_t> input_indices,const Program* program,ProgramUniforms* uniforms,const PreparedStreams* streams) {
     auto& r = *this;
     if(state.color_mask) *r.targets.at(r.current_target).dirty=true;
     if (!r.recording) throw std::runtime_error("Begin a frame before drawing");
     if (!vertex_count || vertex_count > Impl::max_vertices || input_indices.size() > Impl::max_vertices)
         throw std::runtime_error("Draw exceeds bounded vertex/index buffers");
-    const auto found = r.pipelines.find(pipeline_key(state));
-    if (found == r.pipelines.end()) throw std::runtime_error("Pipeline was not prepared before submission");
-    const auto& pipeline = found->second;
+    // Queued draws carry the pipeline selected during preparation. A quality
+    // change retires those handles; standalone draws can still resolve by key.
+    auto pipeline_index=streams?streams->draw.pipeline-r.first_pipeline:UINT64_MAX;
+    if(pipeline_index>=r.pipelines.size()) {
+        const auto found=r.pipeline_keys.find(pipeline_key(state));
+        if(found==r.pipeline_keys.end()) throw std::runtime_error("Pipeline was not prepared before submission");
+        pipeline_index=found->second;
+    }
+    const auto& pipeline=r.pipelines[pipeline_index];
     for (const auto index : input_indices) if (index >= vertex_count) throw std::runtime_error("Vertex index outside draw");
     const auto count = input_indices.empty() ? vertex_count : input_indices.size();
     D3D11_PRIMITIVE_TOPOLOGY topology;
@@ -1528,13 +1702,14 @@ void Renderer::Impl::draw(const RenderState& state,Bytes vertex_bytes,std::size_
     const auto upload = [&]<class T>(ID3D11Buffer* buffer,const T& data,T& previous,bool& uploaded) {
         // These private buffers retain their contents across draws and frames.
         // Compare bytes so NaNs and signed zero keep their exact shader values.
-        if(uploaded && std::memcmp(&previous,&data,sizeof(T))==0) return;
+        if(uploaded && std::memcmp(&previous,&data,sizeof(T))==0) return false;
         PerfScope scope(r.profile,PerfPhase::buffer_upload);
         ++r.stats.buffer_maps;r.stats.total_vertex_bytes+=sizeof(T);
         D3D11_MAPPED_SUBRESOURCE mapped{};
         checked(r.context->Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped), "Buffer map");
         std::memcpy(mapped.pData,&data,sizeof(T)); r.context->Unmap(buffer, 0);
         std::memcpy(&previous,&data,sizeof(T));uploaded=true;
+        return true;
     };
     Constants constants{};
     for (unsigned i = 0; i < 8; ++i) {
@@ -1565,97 +1740,96 @@ void Renderer::Impl::draw(const RenderState& state,Bytes vertex_bytes,std::size_
             constants.gaussian_scale[i]=r.targets.contains(state.textures[i])?r.resolution_scale:1;
         samplers[i] = pipeline.samplers[i].Get();
     }
-    std::array<UINT,17> stream_offsets{},stream_strides{};
     UINT vertex_offset=0;
     if(streams) {
-        PerfScope scope(r.profile,PerfPhase::buffer_upload);
-        std::array<unsigned,16> required{},fetched{},alignments{};
-        for(unsigned i=0;i<streams->layout.attributes.size();++i) {
-            const auto& attribute=streams->layout.attributes[i];
-            if(attribute.stream==16) continue;
-            if(attribute.stream>=streams->streams.size()) throw std::runtime_error("Missing vertex attribute stream");
-            const auto format=attribute_format(attribute.format);
-            required[attribute.stream]=std::max(required[attribute.stream],attribute.offset+format.bytes);
-            fetched[attribute.stream]=std::max(fetched[attribute.stream],streams->layout.native_attributes[i].offset+format.fetched);
-            alignments[attribute.stream]=std::max(alignments[attribute.stream],std::min(format.fetched,4U));
+        // Missing inputs use the current attributes with a zero stride. Keep
+        // them out of the streamed vertices so identical draws share one copy.
+        if(streams->upload.uses_current) {
+            PerfScope scope(r.profile,PerfPhase::buffer_upload);
+            if(upload(r.current_vertices.Get(),streams->draw.current,r.last_current_vertex,r.current_vertex_uploaded))
+                r.stats.vertex_bytes+=sizeof(ProgramVertex);
         }
-        std::size_t total=sizeof(ProgramVertex);
-        for(unsigned i=0;i<streams->streams.size();++i) if(required[i]) {
-            const auto& source=streams->streams[i];
-            if(source.stride>2048 || (source.stride && required[i]>source.stride) ||
-                source.bytes.size()<(vertex_count-1)*source.stride+required[i]) throw std::runtime_error("Vertex stream stride or storage is too small");
-            total=(total+15)&~std::size_t(15);stream_offsets[i]=static_cast<UINT>(total);
-            const auto stride=(streams->layout.repacked&(1U<<i))?fetched[i]:std::max(source.stride,fetched[i]);
-            stream_strides[i]=source.stride?(stride+alignments[i]-1)&~(alignments[i]-1):0;
-            total+=source.stride?vertex_count*stream_strides[i]:fetched[i];
-        }
-        if(total>std::size_t(max_vertices)*sizeof(ProgramVertex)) throw std::runtime_error("Native vertex streams exceed upload storage");
-        r.stats.vertex_bytes+=total;
-        auto* destination=r.append_buffer(r.vertices.Get(),max_vertices*sizeof(ProgramVertex),r.vertex_cursor,total,vertex_offset);
-        std::memcpy(destination,&streams->current,sizeof(ProgramVertex));
-        for(unsigned i=0;i<streams->streams.size();++i) if(required[i]) {
-            const auto& source=streams->streams[i];auto* output=destination+stream_offsets[i];
-            const auto stride=stream_strides[i];
-            const auto size=source.stride?vertex_count*stride:fetched[i];
-            const auto copied=std::min(size,source.bytes.size());
-            if(streams->layout.repacked&(1U<<i)) {
-                struct Copy {unsigned source,destination,size;};
-                std::array<Copy,16> copies{};unsigned count=0;
-                for(unsigned a=0;a<streams->layout.attributes.size();++a) {
-                    const auto& attribute=streams->layout.attributes[a];
-                    if(attribute.stream==i) copies[count++]={attribute.offset,streams->layout.native_attributes[a].offset,attribute_format(attribute.format).bytes};
-                }
-                std::memset(output,0,size);
-                for(std::size_t n=0;n<(source.stride?vertex_count:1);++n)
-                    for(const auto& copy:std::span(copies).first(count))
-                        std::memcpy(output+n*stride+copy.destination,source.bytes.data()+n*source.stride+copy.source,copy.size);
-            } else if(!source.stride || stride==source.stride) {
-                std::memcpy(output,source.bytes.data(),copied);if(copied<size) std::memset(output+copied,0,size-copied);
-            } else for(std::size_t n=0;n<vertex_count;++n) {
-                const auto bytes=std::min<std::size_t>(source.stride,source.bytes.size()-n*source.stride);
-                std::memcpy(output+n*stride,source.bytes.data()+n*source.stride,bytes);
-                std::memset(output+n*stride+bytes,0,stride-bytes);
-            }
-        }
-        r.context->Unmap(r.vertices.Get(),0);
-        for(auto& offset:stream_offsets) offset+=vertex_offset;
     } else {
         PerfScope scope(r.profile,PerfPhase::buffer_upload);
-        auto* destination=r.append_buffer(r.vertices.Get(),max_vertices*sizeof(ProgramVertex),r.vertex_cursor,vertex_bytes.size(),vertex_offset);
+        auto* destination=r.append_buffer(r.vertices.Get(),vertex_capacity,r.vertex_cursor,vertex_bytes.size(),vertex_offset);
         std::memcpy(destination,vertex_bytes.data(),vertex_bytes.size());r.context->Unmap(r.vertices.Get(),0);
         r.stats.vertex_bytes+=vertex_bytes.size();
     }
     upload(r.factor_buffer.Get(),constants,r.last_factors,r.factors_uploaded);
     if(uniforms) {
-        auto values=*uniforms;
+        auto& settings=uniforms->settings;
         if(program->fixed) {
             const auto& fixed=program->fixed_key;
-            values.fixed_flags={std::uint32_t(fixed.normalize),std::uint32_t(fixed.fog),fixed.fog_source,0};values.fixed_texgen=fixed.texgen;
-            for(unsigned i=0;i<4;++i) values.fixed_matrices[i]=fixed.texture_matrix[i];
+            settings.fixed_flags={std::uint32_t(fixed.normalize),std::uint32_t(fixed.fog),fixed.fog_source,0};
+            settings.fixed_texgen=fixed.texgen;
+            for(unsigned i=0;i<4;++i) settings.fixed_matrices[i]=fixed.texture_matrix[i];
         }
-        upload(r.program_constants.Get(),values,r.last_program_uniforms,r.program_uniforms_uploaded);
+        // Snapshot addresses stay valid within this batch. A different batch
+        // or a standalone draw still compares the exact shader bytes.
+        const auto& values=uniforms->constants;
+        const bool constants_changed=!r.program_uniforms_uploaded || ((!streams || streams->bound_constants!=&values) &&
+            std::memcmp(&values,&r.last_program_constants,sizeof(values)));
+        if(constants_changed || std::memcmp(&settings,&r.last_program_settings,sizeof(settings))) {
+            PerfScope scope(r.profile,PerfPhase::buffer_upload);
+            ++r.stats.buffer_maps;r.stats.total_vertex_bytes+=program_uniform_bytes;
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            checked(r.context->Map(r.program_constants.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped),"Buffer map");
+            std::memcpy(mapped.pData,&values,sizeof(values));
+            std::memcpy(static_cast<std::byte*>(mapped.pData)+sizeof(values),&settings,sizeof(settings));
+            r.context->Unmap(r.program_constants.Get(),0);
+            if(constants_changed) std::memcpy(&r.last_program_constants,&values,sizeof(values));
+            std::memcpy(&r.last_program_settings,&settings,sizeof(settings));
+            r.program_uniforms_uploaded=true;
+        }
+        if(streams) streams->bound_constants=&values;
     }
     const UINT stride = static_cast<UINT>(program?sizeof(ProgramVertex):sizeof(Vertex));
-    auto vertex_buffer = r.vertices.Get(); auto constant_buffer = r.factor_buffer.Get();
+    auto vertex_buffer = r.vertices.Get();
     if(streams) {
-        std::array<ID3D11Buffer*,17> buffers{};buffers.fill(vertex_buffer);
-        r.context->IASetVertexBuffers(0,17,buffers.data(),stream_strides.data(),stream_offsets.data());
+        if(!streams->draw.streams.empty()) {
+            std::array<ID3D11Buffer*,16> buffers{};buffers.fill(vertex_buffer);
+            r.context->IASetVertexBuffers(0,static_cast<UINT>(streams->draw.streams.size()),buffers.data(),streams->upload.strides.data(),streams->upload.offsets.data());
+        }
+        if(streams->upload.uses_current && !r.current_vertex_bound) {
+            auto current=r.current_vertices.Get();
+            constexpr UINT zero=0;
+            r.context->IASetVertexBuffers(16,1,&current,&zero,&zero);
+            r.current_vertex_bound=true;
+        }
     } else r.context->IASetVertexBuffers(0, 1, &vertex_buffer, &stride, &vertex_offset);
-    r.context->IASetInputLayout(streams?streams->layout.native.Get():program?program->layout.Get():r.layout.Get()); r.context->IASetPrimitiveTopology(topology);
     const auto simple=simple_combiner(state);
-    r.context->VSSetShader(program?program->vertex.Get():r.vs.Get(), nullptr, 0);
-    r.context->PSSetShader(simple<r.simple_combiners.size()?r.simple_combiners[simple].Get():r.combiners[state.combiner_control&255].Get(),nullptr,0);
-    auto program_buffer=r.program_constants.Get(); r.context->VSSetConstantBuffers(1,1,&program_buffer);
-    r.context->PSSetConstantBuffers(0, 1, &constant_buffer);
-    r.context->PSSetShaderResources(0, static_cast<UINT>(views.size()), views.data()); r.context->PSSetSamplers(0, 4, samplers.data());
-    r.context->OMSetBlendState(pipeline.blend.Get(), nullptr, ~0U);
-    r.context->OMSetDepthStencilState(pipeline.depth.Get(), state.stencil_reference); r.context->RSSetState(pipeline.raster.Get());
+    DrawBindings bindings{streams?streams->layout.native.Get():program?program->layout.Get():r.layout.Get(),topology,
+        program?program->vertex.Get():r.vs.Get(),
+        simple<r.simple_combiners.size()?r.simple_combiners[simple].Get():r.combiners[state.combiner_control&255].Get(),
+        pipeline.blend.Get(),pipeline.depth.Get(),pipeline.raster.Get(),state.stencil_reference,views,samplers,{}};
     if(state.scissor_test) {
         const auto scale=LONG(r.resolution_scale);
-        const D3D11_RECT rect{state.scissor[0]*scale,state.scissor[1]*scale,state.scissor[2]*scale,state.scissor[3]*scale};
-        if(rect.right<rect.left || rect.bottom<rect.top) throw std::runtime_error("Invalid scissor rectangle");
-        r.context->RSSetScissorRects(1,&rect);
+        for(unsigned i=0;i<bindings.scissor.size();++i) bindings.scissor[i]=state.scissor[i]*scale;
+        if(bindings.scissor[2]<bindings.scissor[0] || bindings.scissor[3]<bindings.scissor[1])
+            throw std::runtime_error("Invalid scissor rectangle");
     }
+    const auto& bound=r.bound_draw;
+    if(!bound || bound->layout!=bindings.layout) r.context->IASetInputLayout(bindings.layout);
+    if(!bound || bound->topology!=bindings.topology) r.context->IASetPrimitiveTopology(bindings.topology);
+    if(!bound || bound->vertex!=bindings.vertex) r.context->VSSetShader(bindings.vertex,nullptr,0);
+    if(!bound || bound->pixel!=bindings.pixel) r.context->PSSetShader(bindings.pixel,nullptr,0);
+    if(!bound) {
+        auto program_buffer=r.program_constants.Get(), factor_buffer=r.factor_buffer.Get();
+        r.context->VSSetConstantBuffers(1,1,&program_buffer);
+        r.context->PSSetConstantBuffers(0,1,&factor_buffer);
+    }
+    if(!bound || bound->views!=views) r.context->PSSetShaderResources(0,static_cast<UINT>(views.size()),views.data());
+    if(!bound || bound->samplers!=samplers) r.context->PSSetSamplers(0,static_cast<UINT>(samplers.size()),samplers.data());
+    if(!bound || bound->blend!=bindings.blend) r.context->OMSetBlendState(bindings.blend,nullptr,UINT_MAX);
+    if(!bound || bound->depth!=bindings.depth || bound->stencil_reference!=bindings.stencil_reference)
+        r.context->OMSetDepthStencilState(bindings.depth,bindings.stencil_reference);
+    if(!bound || bound->raster!=bindings.raster) r.context->RSSetState(bindings.raster);
+    if(state.scissor_test && (!bound || bound->raster!=bindings.raster || bound->scissor!=bindings.scissor)) {
+        const auto& rect=bindings.scissor;
+        const D3D11_RECT native_rect{rect[0],rect[1],rect[2],rect[3]};
+        r.context->RSSetScissorRects(1,&native_rect);
+    }
+    r.bound_draw=bindings;
     if (indices.empty()) r.context->Draw(static_cast<UINT>(vertex_count), 0);
     else {
         UINT index_offset=0;
@@ -1765,6 +1939,7 @@ Image Renderer::read_display() {
 RenderStats Renderer::stats() const {
     auto result=impl_->stats;result.texture_bytes=impl_->texture_bytes;result.target_bytes=impl_->target_bytes+impl_->presentation_bytes();
     result.antialiasing=impl_->antialiasing_quality;result.anisotropy=impl_->anisotropy;
+    result.unlimited_render_distance=impl_->unlimited_render_distance;
     result.texture_slots=static_cast<std::uint32_t>(impl_->textures.size()-1);result.resolution_scale=impl_->resolution_scale;return result;
 }
 std::string Renderer::adapter() const { return impl_->adapter; }

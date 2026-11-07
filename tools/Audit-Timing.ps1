@@ -3,6 +3,8 @@ param(
     [string]$Tool = 'build/windows/Release/smbd-tool.exe',
     [string]$Cases = 'knowledge/timing_cases.json',
     [string]$Output = 'build/checks/timing',
+    [string[]]$Only = @(),
+    [switch]$ProbesOnly,
     [switch]$InventoryOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -24,6 +26,13 @@ try {
             $reviews[$site]=$finding
         }
     }
+    if($Only.Count) {
+        if($InventoryOnly) { throw '-Only cannot be combined with -InventoryOnly.' }
+        foreach($pattern in $Only) { if(!@($suite.cases | Where-Object name -Like $pattern).Count) { throw "No timing case matches: $pattern" } }
+        $suite.cases=@($suite.cases | Where-Object { $name=$_.name; @($Only | Where-Object { $name -like $_ }).Count })
+        $ProbesOnly=$true
+    }
+    if($ProbesOnly -and $InventoryOnly) { throw '-ProbesOnly cannot be combined with -InventoryOnly.' }
     New-Item -ItemType Directory -Force -Path $Output | Out-Null
     if ((Get-Item -LiteralPath $Batch).Length -gt 128MB) { throw 'Timing index exceeds its input bound.' }
     # JsonDocument avoids expanding the full instruction/writer index into
@@ -36,7 +45,7 @@ try {
         if ($batchRoot.GetProperty('sha256').GetString() -ne $target) { throw 'Timing index belongs to another executable.' }
         $closed = $batchRoot.GetProperty('game_reachability').GetProperty('closed').GetBoolean()
         $events = @($batchRoot.GetProperty('timing_events').ToString() | ConvertFrom-Json)
-        foreach ($function in $batchRoot.GetProperty('functions').EnumerateArray()) {
+        if(!$ProbesOnly) { foreach ($function in $batchRoot.GetProperty('functions').EnumerateArray()) {
             $entry = $function.GetProperty('entry').GetString()
             $entryCode = $function.GetProperty('timing_entry').GetString()
             $sites = @($function.GetProperty('timing_sites').ToString() | ConvertFrom-Json)
@@ -66,8 +75,10 @@ try {
                 }
                 $updates[$update.address].owners.Add($entry)
             }
-        }
+        } }
     } finally { $document.Dispose(); $stream.Dispose() }
+    $index=[pscustomobject]@{batch_sha256=(Get-FileHash $Batch -Algorithm SHA256).Hash;remaining_research=$null}
+    if(!$ProbesOnly) {
     foreach($site in $reviews.Keys) {
         if(!$changes.ContainsKey($site) -and !$changes.ContainsKey("entry:$site") -and !$updates.ContainsKey($site) -and $site -notin $updates.Values.operation) {
             throw "Reviewed timing site is absent from the current index: $site"
@@ -161,6 +172,7 @@ try {
     Write-Host "Timing inventory: $($familyReport.Count) roots, $($changes.Count) existing changes, $(@($candidates | Where-Object scene_path).Count)/$(@($candidates).Count) recurrence candidates on possible intermediate-scene paths."
     Write-Host "Research remains open: $($index.remaining_research.scene_candidates) scene candidates and $($index.remaining_research.changes) timing changes lack review. Passing probes does not close this queue."
     if ($InventoryOnly) { return }
+    }
 
     $toolHash=(Get-FileHash -LiteralPath $Tool -Algorithm SHA256).Hash
     $runDirectory = Join-Path $Output ('run-'+[DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-ffff'))
@@ -243,6 +255,11 @@ try {
                             $time = $samples[$sample]
                             for ($o=0; $o -lt $case.observe.Count; ++$o) {
                                 $observation = $case.observe[$o]
+                                $time=$samples[$sample]
+                                if($observation.quantize -eq 'truncate') {
+                                    $whole=[Math]::Floor($time+1e-9)
+                                    $time=$whole+[double][float]($time-$whole)
+                                }
                                 $values = @(Values $observation $reads[$sample*$case.observe.Count+$o].bytes)
                                 for ($component=0; $component -lt $values.Count; ++$component) {
                                     $value = $values[$component]; $expected = $null
@@ -256,7 +273,12 @@ try {
                                             $tick=[int][Math]::Floor($time+1e-9)
                                             $expected=$observation.expected[$tick]
                                             if ($tick -lt $case.ticks -and $null -ne $observation.phase_speeds) {
-                                                $expected+=$observation.phase_speeds[$tick]*($time-$tick)
+                                                # The recipe sends a float phase. An integer sample can
+                                                # straddle a truncation boundary if the oracle uses the
+                                                # double schedule time instead of that actual input.
+                                                $phase=if($observation.quantize -eq 'truncate'){[double][float]($time-$tick)}else{$time-$tick}
+                                                $expected+=$observation.phase_speeds[$tick]*$phase
+                                                if($observation.quantize -eq 'truncate'){$expected=[Math]::Truncate($expected)}
                                             }
                                         }
                                         euler { $expected=$observation.initial[$component]+$observation.speed[$component]*$time+$observation.acceleration[$component]*$time*($time+1)/2 }
@@ -277,6 +299,14 @@ try {
                                         }
                                         endpoint { if ($sample -eq $samples.Count-1 -and $null -ne $baseline) { $expected=$baseline[$last.Count] } }
                                         default { throw "Unknown timing rule $($observation.rule)" }
+                                    }
+                                    if($null -ne $expected -and $observation.quantize -eq 'truncate') {
+                                        if($observation.rule -eq 'linear') {
+                                            $whole=[Math]::Floor($time)
+                                            $expected=$observation.initial[$component]+$observation.speed[$component]*$whole+
+                                                [Math]::Truncate([double][float](($time-$whole)*$observation.speed[$component]))
+                                        }
+                                        $expected=[Math]::Truncate($expected)
                                     }
                                     if (![double]::IsFinite($value)) { $failure="Non-finite $($observation.name) at $time ticks." }
                                     if ($null -ne $expected) {
@@ -310,7 +340,7 @@ try {
     $report = [pscustomobject]@{
         format='smbd-timing-audit-v1';source_sha256=$target;tool_sha256=$toolHash;batch_sha256=$index.batch_sha256
         cases_sha256=$casesHash;passed=($failed.Count -eq 0 -and $closed);exhaustive=$false
-        scope='AOT numeric probes and original-code inventory; not complete gameplay or visual acceptance.'
+        scope=$(if($ProbesOnly){'Selected AOT numeric probes; original-code inventory was not scanned. Not complete gameplay or visual acceptance.'}else{'AOT numeric probes and original-code inventory; not complete gameplay or visual acceptance.'})
         remaining_research=$index.remaining_research
         checks=$results.Count;failures=$failed.Count;findings=@($findings);results=$results.ToArray()
     }

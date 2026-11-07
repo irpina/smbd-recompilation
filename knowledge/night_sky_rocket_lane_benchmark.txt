@@ -1,0 +1,124 @@
+Night-Sky Rocket Lane performance benchmark, 2026-11-05
+
+Verified executable SHA256
+9B49918BC4CD0D2541369534F9A458679F43C63462869F0F37C0ED69B3349DC2
+
+The default benchmark is Monkey Bowling > Special Mode > one player > AIAI >
+level 1 > Night-Sky Rocket Lane. It uses neutral input at the aiming position,
+120 original ticks of warmup and 1,200 measured ticks. The target remains
+2.778 ms per frame at native 1x in widescreen with VSync off. Each hidden,
+muted run has its own copy of the source saves.
+
+The input route only reads game state and sends SDL controller input.
+Mode 32 is the menu framework. Menu 0 selects Party Games at 8B23D0 = 1,
+and menu 1 selects Monkey Bowling at 8B23D1 = 4. Menu 48 selects Special
+Mode at 8B2400 = 1. Menu 4 selects one player and menu 5 selects AIAI.
+Menu 50 selects Night-Sky Rocket Lane at 8B2402 = 1.
+
+The original menu callback 2A52B0 reads 8B23D0 + the active menu. Its
+selection-one branch at 2A5333..2A5347 writes 1 to 8B24FE. The English
+option text points to 446FD8 from 6A9B38. Original Bowling initialization
+at 1A4551..1A455F loads stage 159 when 8B24FE is 1. The shared stage loader
+at 81CEF stores its stage argument at 5550A8. Native analysis reports
+are under build/checks/night-sky-route/.
+
+The runner checks mode 172, AIAI, Special Mode 2, level variant 0, lane 1
+and stage 159 at the start and end of each measurement window. It also
+rejects mode changes, ball-state changes, incomplete input and missing
+or dropped timing data. The rule clock remains 60 Hz.
+
+Baseline on Ryzen 5 5600X / GeForce RTX 5060 Ti
+
+The first full window measured 3,222 frames, 6.0659 ms median and
+8.0720 ms p99. GPU median and p99 were 1.4761 and 2.0037 ms. Peak
+working set was 304.38 MiB. Reports are in build/checks/night-sky-baseline-3/.
+The baseline executable SHA256 is
+B9330A3F549E52D8449B5E61EF9FBE1B919F3A820293EDD2B72569255FF67FCE.
+
+A separate ten-second profile recorded 6,792 main-thread samples.
+The largest individual engine helper was Memory::access at 295 samples
+(4.34%), followed by translated GPU stream setup at 003267F0 (3.18%),
+vertex packing at 0002F4A0 (2.99%) and GPU command submission (2.75%).
+The largest Bowling-specific routine was 001B5B20 (2.50%).
+Profiles are in build/checks/night-sky-native-profile/.
+
+Bounded native disassembly of Memory::access at 140018160..140018210
+showed a shared call with a stack frame and dynamic access-width checks.
+Its callers often use fixed four-, eight- or sixteen-byte accesses.
+
+Rejected broad inlining experiment
+
+Forcing both Memory::access and its full bounds helper inline removed the
+shared calls but grew the game executable from 68.45 to 107.07 MiB.
+Three interleaved pairs had middle run medians of 6.0410 ms before and
+6.1356 ms after, and middle run p99s of 8.2319 and 8.4676 ms. GPU command
+processing improved, while comparable-frame translated-code median rose
+from 4.2992 to 4.4351 ms. One control run had an 11.1428 ms p99.
+The larger build was rejected.
+
+Regular, split, unmapped, unaligned and mixed-NaN CPU probes matched.
+Both 1,437-draw captures replayed exactly, and the live timing route
+retained 183 goal-to-replay ticks and 171 motion samples at the 360 Hz
+setting. Reports are in build/checks/night-sky-inline-access/.
+The rejected executable SHA256 was
+C0BB833FB2AD07B27F84FD4EC8221E4A1535BFFB4A2FF386E4EFD46597513372.
+
+Rejected shared lookup experiment
+
+A second measured variant kept a nonthrowing, read-only lookup out of line
+and handled failed bounds checks at its callers. The shared lookup was
+confirmed in the native map, but the executable still grew to 102.00 MiB.
+An intermediate version let the compiler inline that lookup and reached
+108.05 MiB; it was discarded before benchmarking.
+
+Three interleaved 1,200-tick pairs on the same isolated saves measured:
+                    before median/p99       after median/p99 (ms)
+  pair 1               5.8091 / 6.7628         6.1273 / 7.5357
+  pair 2               5.7775 / 6.6052         6.0735 / 7.2132
+  pair 3               5.8576 / 7.1192         6.0893 / 8.1496
+
+The middle run median regressed 4.8%; the middle run p99 regressed 11.4%.
+Matching six groups by draws, vertices, packets and logic ticks retained
+9,654 frames per variant. Their median frame time rose from 5.8142 to
+6.0974 ms, and translated-code median rose from 4.1025 to 4.4119 ms.
+GPU medians remained about 1.48..1.49 ms. Peak working sets were
+299.92..302.20 MiB before and 302.52..306.54 MiB after.
+
+Each full route took about 47.4 seconds, including the twenty-second
+measurement window. Its first measured tick was 1,572 in all six runs.
+The remaining time includes startup, menu navigation and warmup; it is
+not an isolated asset-loading measurement.
+
+All five CPU probe comparisons matched, including split, unmapped,
+unaligned and mixed-NaN cases. Texture checks passed. Both 1,437-draw
+captures replayed with zero changed pixels and no D3D11 errors. CPU,
+input, audio, clock checks and all 429 timing probes passed. The live
+360 Hz timing route retained 183 goal-to-replay ticks and 171 fresh
+motion samples. These checks establish agreement with the existing
+build; they do not establish original-Xbox visual parity.
+
+Reports are in build/checks/night-sky-readonly-lookup/. The rejected
+executable SHA256 was
+5514EF20AE6FAB1FC15D6D648A413E8DA4B0F4474ACF19431D030DE7AFB71002.
+
+The memory helper changes were reverted to the exact saved pre-experiment
+header, retaining earlier accepted optimizations. The new scene route,
+benchmark validation and state reporting remain. No new CPU optimization
+was accepted for this scene in this pass. The latest three control runs
+have a middle median of 5.8091 ms and middle p99 of 6.7628 ms, still above
+the 2.778 ms target. CPU work remains the main limitation.
+
+Final restored build verification
+
+The restored source was rebuilt through tools/Build.ps1 -Stage Timing
+-Workers 3. The game returned to 68.45 MiB; CPU, input, audio, clock
+checks and 429/429 timing probes passed. Its executable SHA256 is
+897AAA7409257051777F5276492FDBE749CCF296D72A3E4F4C26E71F3B827512.
+Build output is in build/logs/night-sky-restored-rebuild.log.
+
+A final full benchmark verified the selected mode, lane and stage again:
+3,392 frames, 5.8229 ms median, 6.7702 ms p99; GPU 1.4775 ms median
+and 1.6420 ms p99; peak working set 302.42 MiB. The scripted run took
+47.69 seconds. Reports are in build/checks/night-sky-restored-final/.
+The 360 Hz target remains unmet. No build or game processes were left
+running after validation. Work stops here at the user's request.

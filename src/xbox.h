@@ -28,6 +28,7 @@ struct XboxHost {
     bool trace_io = false, mute_audio = true;
     bool trace_storage=false;
     bool widescreen=false,ultrawide=false;
+    bool unlimited_render_distance=false;
 };
 struct BootIo {
     std::uint32_t ordinal=0,status=0,information=0,callsite=0;
@@ -79,11 +80,12 @@ public:
     void performance_recording(bool);
     void output_gain(float);
     void aspect_ratio(unsigned mode);
+    void unlimited_render_distance(bool);
 private:
     friend std::string check_services(Xbe&,const std::filesystem::path&,const std::filesystem::path&);
     friend void native_platform(Cpu&,Memory&,std::uint32_t);
     friend void native_frame_wait(Cpu&,Memory&);
-    friend void native_frame_begin(Cpu&,Memory&);
+    friend void native_frame_begin(Cpu&,Memory&,std::uint32_t);
     friend void native_stage_time(Cpu&,Memory&);
     friend void native_stage_group_time(Cpu&,Memory&);
     friend void native_menu_layout(Cpu&,Memory&,std::uint32_t,bool);

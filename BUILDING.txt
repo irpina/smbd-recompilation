@@ -152,8 +152,8 @@ including native framebuffer-to-texture copies. CPU, controller, mixer and D3D11
 diagnostics pass; knowledge/runtime_progress.json records the current counts.
 Story Mode's first level, 1-1 SIMPLE, loads and responds to controller input;
 the automated forward-input run reaches GOAL while the neutral comparison stays
-still. Opening movies and saved settings now work. Practice Mode's 2-3 COMPOSITION
-is the current repeatable performance benchmark; see README.md and PLAYTEST.txt.
+still. Opening movies and saved settings now work. Monkey Bowling's Night-Sky
+Rocket Lane is the current repeatable performance benchmark. See PLAYTEST.txt.
 Remaining calls/services, complete audio and gameplay coverage, Linux/macOS,
 visual parity and sustained 360 Hz performance require further work.
 See runtime_progress.json

@@ -84,11 +84,13 @@ live in data/user; keep storage.key with that entire folder when backing it up.
 
 Repeatable performance benchmark (PowerShell, from the project folder):
   .\tools\Benchmark.ps1
-It uses Practice Mode > AIAI > Story World 2 > 3 COMPOSITION, neutral stick,
-two seconds of gameplay warmup, then twenty seconds of original game ticks.
-Three hidden, muted runs use separate copies of data/user saves. World 2 and
-Composition must be unlocked. Native 1x, widescreen, 360 Hz, VSync off.
-Results, screenshots and CPU/GPU frame reports go to build/checks/composition-*.
+It uses Monkey Bowling > Special Mode > AIAI > Night-Sky Rocket Lane, with
+neutral input at the aiming position. Two seconds of gameplay warmup precede
+twenty seconds of original game ticks. Three hidden, muted runs use separate
+copies of data/user saves. Use native 1x, widescreen, 360 Hz, VSync off.
+Results, screenshots and CPU/GPU reports go to build/checks/night-sky-rocket-lane-*.
+The runner checks Special Mode, the chosen lane and loaded stage 159.
+Use -Scene ProSkaters or -Scene Composition for the previous stage benchmarks.
 The target remains 2.778 ms per frame. A successful run validates the scene;
 benchmark.json separately reports whether its p99 frame time meets the target.
 Use -Runs, -Seconds, -Storage, -Executable or -Output to override the defaults.

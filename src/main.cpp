@@ -145,9 +145,9 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
     if(settings.fullscreen && !hidden && !SDL_SetWindowFullscreen(window.get(),true)) throw std::runtime_error(SDL_GetError());
     smbd::Renderer renderer(640,480,false,false,static_cast<unsigned>(settings.resolution));
     startup_phase("renderer ready");
-    try {renderer.enhancements(settings.antialiasing,settings.anisotropy);}
+    try {renderer.enhancements(settings.antialiasing,settings.anisotropy,settings.unlimited_render_distance);}
     catch(const std::exception& error) {
-        settings.antialiasing=0;renderer.enhancements(0,settings.anisotropy);
+        settings.antialiasing=0;renderer.enhancements(0,settings.anisotropy,settings.unlimited_render_distance);
         settings_error=std::string(error.what())+" Antialiasing has been set to Off.";
         try {settings.save(settings_path);} catch(const std::exception& save_error) {settings_error+=' ';settings_error+=save_error.what();}
     }
@@ -157,27 +157,35 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
     if(!settings_error.empty()) ui.message(settings_error);
     smbd::Xbox* running=nullptr;
     int active_aspect=settings.aspect;
+    bool active_unlimited_render_distance=settings.unlimited_render_distance;
     const auto graphics_changed=[&] {
         const auto current=renderer.stats();
         return unsigned(settings.resolution)!=current.resolution_scale || unsigned(settings.antialiasing)!=current.antialiasing ||
-            unsigned(settings.anisotropy)!=current.anisotropy || settings.aspect!=active_aspect;
+            unsigned(settings.anisotropy)!=current.anisotropy || settings.aspect!=active_aspect ||
+            settings.unlimited_render_distance!=active_unlimited_render_distance ||
+            settings.unlimited_render_distance!=current.unlimited_render_distance;
     };
     const auto applied_settings=[&] {
         auto applied=settings;const auto current=renderer.stats();
         applied.resolution=int(current.resolution_scale);applied.antialiasing=int(current.antialiasing);
         applied.anisotropy=int(current.anisotropy);applied.aspect=active_aspect;
+        applied.unlimited_render_distance=active_unlimited_render_distance;
         return applied;
     };
     const auto apply_graphics=[&] {
         if(!graphics_changed()) return;
         try {
-            renderer.image_quality(settings.resolution,settings.antialiasing,settings.anisotropy);
+            renderer.image_quality(settings.resolution,settings.antialiasing,settings.anisotropy,settings.unlimited_render_distance);
             if(settings.aspect!=active_aspect) {
                 if(running) running->aspect_ratio(settings.aspect);
                 renderer.aspect_ratio(settings.display_aspect());active_aspect=settings.aspect;
             }
-            smbd::diagnostic_record(std::format("{{\"type\":\"graphics_settings\",\"resolution_scale\":{},\"antialiasing\":{},\"anisotropy\":{},\"aspect_mode\":{},\"playing\":{}}}",
-                settings.resolution,settings.antialiasing,settings.anisotropy,active_aspect,running!=nullptr));
+            if(settings.unlimited_render_distance!=active_unlimited_render_distance) {
+                if(running) running->unlimited_render_distance(settings.unlimited_render_distance);
+                active_unlimited_render_distance=settings.unlimited_render_distance;
+            }
+            smbd::diagnostic_record(std::format("{{\"type\":\"graphics_settings\",\"resolution_scale\":{},\"antialiasing\":{},\"anisotropy\":{},\"aspect_mode\":{},\"unlimited_render_distance\":{},\"playing\":{}}}",
+                settings.resolution,settings.antialiasing,settings.anisotropy,active_aspect,active_unlimited_render_distance,running!=nullptr));
         } catch(const std::exception& error) {
             settings=applied_settings();
             ui.message("Could not apply graphics settings: "+std::string(error.what()));
@@ -288,10 +296,13 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
     const auto benchmark_state=[&] {
         const auto value=[&](std::uint32_t address) {return std::bit_cast<float>(memory.load<std::uint32_t>(address));};
         const auto world=memory.load<std::uint8_t>(0x8B246A);
-        return std::format("{{\"mode\":{},\"ball_state\":{},\"character\":{},\"practice_category\":{},\"practice_world\":{},\"practice_stage\":{},\"ball\":[{:.9g},{:.9g},{:.9g}],\"stage_time\":{:.9g}}}",
+        return std::format("{{\"mode\":{},\"ball_state\":{},\"character\":{},\"practice_category\":{},\"practice_world\":{},\"practice_stage\":{},\"ball\":[{:.9g},{:.9g},{:.9g}],\"stage_time\":{:.9g},\"menu\":{},\"party_selection\":{},\"bowling_mode\":{},\"bowling_variant\":{},\"bowling_stage\":{},\"stage_id\":{}}}",
             memory.load<std::uint32_t>(0x6C9354),memory.load<std::uint8_t>(0x738DF3),memory.load<std::uint32_t>(0x739B70),
             memory.load<std::uint8_t>(0x8B2468),world,world<10?int(memory.load<std::uint8_t>(0x8B2475+world)):-1,
-            value(0x738DF4),value(0x738DF8),value(0x738DFC),value(0x72FF84));
+            value(0x738DF4),value(0x738DF8),value(0x738DFC),value(0x72FF84),
+            memory.load<std::uint8_t>(0x8B2680),memory.load<std::uint8_t>(0x8B23D1),
+            memory.load<std::uint8_t>(0x8B24FC),memory.load<std::uint8_t>(0x8B24FD),
+            memory.load<std::uint8_t>(0x8B24FE),memory.load<std::uint32_t>(0x5550A8));
     };
     std::vector<std::string> motion_samples;
     if(!motion_report.empty()) motion_samples.reserve(static_cast<std::size_t>(motion_frames));
@@ -389,6 +400,7 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
     host.performance=&performance;
     host.widescreen=active_widescreen;
     host.ultrawide=active_aspect==2;
+    host.unlimited_render_distance=active_unlimited_render_distance;
     host.refresh_rate=[&] {return presentation_rate(settings,ui);};
     host.poll=[&](std::uint64_t ticks) {
         logic_ticks=ticks;
@@ -449,10 +461,10 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
             const auto caption=memory.load<std::uint32_t>(0x567A98);
             const int caption_ticks=movie && ordinary(caption) && memory.load<std::uint32_t>(0x6C9364)==0 && memory.load<std::uint32_t>(0x6C9354)==8?
                 23*memory.load<std::uint8_t>(caption+0x0C)+memory.load<std::uint8_t>(caption+0x0E):-1;
-            motion_samples.push_back(std::format("{{\"frame\":{},\"ticks\":{},\"seconds\":{:.9f},\"delta\":{:.9g},\"scene\":{},\"ball_state\":{},\"ball\":[{:.9g},{:.9g},{:.9g}],\"matrix\":[{:.9g},{:.9g},{:.9g}],\"camera\":[{:.9g},{:.9g},{:.9g}],\"stage_time\":{:.9g},\"animation_frame\":{:.9g},\"animation_speed\":{:.9g},\"draws\":{},\"rule_tick\":{},\"mode\":{},\"mode_timer\":{},\"course_flags\":{},\"ball_flags\":{},\"ape_flags\":{},\"replay_time\":{:.9g},\"camera_state\":{},\"velocity\":[{:.9g},{:.9g},{:.9g}],\"requested_animation\":{},\"current_animation\":{},\"animation_end\":{:.9g},\"animation_loops\":{},\"movie_frames\":{},\"movie_frames_skipped\":{},\"movie_sync\":{},\"caption_ticks\":{}}}",
+            motion_samples.push_back(std::format("{{\"frame\":{},\"ticks\":{},\"seconds\":{:.9f},\"delta\":{:.9g},\"scene\":{},\"ball_state\":{},\"ball\":[{:.9g},{:.9g},{:.9g}],\"matrix\":[{:.9g},{:.9g},{:.9g}],\"camera\":[{:.9g},{:.9g},{:.9g}],\"camera_matrix\":[{:.9g},{:.9g},{:.9g},{:.9g},{:.9g},{:.9g},{:.9g},{:.9g},{:.9g},{:.9g},{:.9g},{:.9g}],\"stage_time\":{:.9g},\"animation_frame\":{:.9g},\"animation_speed\":{:.9g},\"draws\":{},\"rule_tick\":{},\"mode\":{},\"mode_timer\":{},\"course_flags\":{},\"ball_flags\":{},\"ape_flags\":{},\"replay_time\":{:.9g},\"camera_state\":{},\"velocity\":[{:.9g},{:.9g},{:.9g}],\"requested_animation\":{},\"current_animation\":{},\"animation_end\":{:.9g},\"animation_loops\":{},\"movie_frames\":{},\"movie_frames_skipped\":{},\"movie_sync\":{},\"caption_ticks\":{}}}",
                 frames,logic_ticks,std::chrono::duration<double>(last_source-first_source).count(),smbd::frame_step.delta,memory.load<std::uint16_t>(0x6C9288),memory.load<std::uint8_t>(0x738DF3),
                 value(0x738DF4),value(0x738DF8),value(0x738DFC),value(0x738E2C),value(0x738E3C),value(0x738E4C),
-                value(0x73F1A0),value(0x73F1A4),value(0x73F1A8),value(0x72FF84),std::isfinite(sample_frame)?sample_frame:-1,std::isfinite(sample_speed)?sample_speed:-1,counters[0],
+                value(0x73F1A0),value(0x73F1A4),value(0x73F1A8),value(0x73F2EC),value(0x73F2F0),value(0x73F2F4),value(0x73F2F8),value(0x73F2FC),value(0x73F300),value(0x73F304),value(0x73F308),value(0x73F30C),value(0x73F310),value(0x73F314),value(0x73F318),value(0x72FF84),std::isfinite(sample_frame)?sample_frame:-1,std::isfinite(sample_speed)?sample_speed:-1,counters[0],
                 smbd::frame_step.logic,memory.load<std::uint32_t>(0x6C9354),std::bit_cast<std::int32_t>(memory.load<std::uint32_t>(0x6C92F0)),memory.load<std::uint32_t>(0x6C92F8),
                 memory.load<std::uint32_t>(0x738E88),ordinary(ape)?memory.load<std::uint32_t>(ape+0x248):0,value(0x8AFA90),memory.load<std::uint8_t>(0x73F1BE),
                 value(0x738E0C),value(0x738E10),value(0x738E14),ordinary(ape)?memory.load<std::uint32_t>(ape+0x70):0,ordinary(ape)?memory.load<std::uint32_t>(ape+0x7C):0,ordinary(animation)?value(animation+0x50):0,ordinary(animation)?memory.load<std::uint32_t>(animation+0x54):0,
@@ -546,6 +558,7 @@ int run(int argc,wchar_t** argv,bool restarting=false) {
               << ",\"controller_steps\":" << (automation?automation->applied():0)
               << ",\"controller_waits\":" << (automation?automation->waits_applied():0)
               << ",\"controller_complete\":" << (!automation || automation->finished()?"true":"false")
+              << ",\"controller_state\":" << (automation?benchmark_state():"null")
               << ",\"audio_muted\":" << (muted?"true":"false")
               << ",\"capture_written\":" << (result.capture_written?"true":"false") << ",\"capture_error\":" << smbd::json(result.capture_error)
               << ",\"frame_capture\":{\"directory\":" << smbd::json(smbd::path_text(xbox.capture_status().directory))

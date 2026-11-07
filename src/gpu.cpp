@@ -26,6 +26,17 @@ unsigned attribute_bytes(std::uint32_t format) {
     throw std::runtime_error("Unsupported NV097 vertex attribute format");
 }
 void checked_gpu(HRESULT status) {if(FAILED(status)) throw std::runtime_error(std::format("GPU completion query failed: 0x{:08X}",static_cast<unsigned>(status)));}
+
+constexpr unsigned max_elements=32768, max_inline_words=2*1024*1024;
+
+// These NV097 settings are consumed by later methods and draws. A packet may
+// copy the register image directly only when every word stays in one range.
+bool register_packet(unsigned first,unsigned last) {
+    return (first>=0x200 && last<0x440) || // Surface, combiner inputs and fixed state.
+        (first>=0x9C0 && last<=0x9C8) || (first>=0xA60 && last<=0xADC) || // Fog and combiners.
+        (first>=0x1720 && last<=0x17F8) || (first>=0x181C && last<0x1880) || // Vertex formats and array state.
+        (first>=0x1B00 && last<0x1C00) || (first>=0x1E20 && last<=0x1E7C); // Texture units and final combiners.
+}
 }
 RenderState gpu_render_state(std::span<const std::uint32_t,2048> registers,std::uint32_t primitive) {
     const auto reg=[&](unsigned method) {return registers[method/4];};
@@ -100,23 +111,31 @@ struct Gpu::Impl {
     std::map<std::uint32_t,std::array<std::uint32_t,2048>> object_state;
     VertexProgram program;
     VertexConstants constants{};
+    unsigned constant_first=constants.size(),constant_end=0;
     ProgramVertex current{};
     std::uint32_t program_load=0,constant_load=0,primitive=0,target=0,prepared_program=0;
     std::uint32_t array_first=0,array_count=0,array_command=0,array_callsite=0;
     std::vector<std::uint32_t> indices,inline_words;
     struct Draw {
-        RenderState state;VertexConstants constants;ProgramView view;ProgramVertex current;
+        RenderState state;const VertexConstants* constants=nullptr;ProgramView view;ProgramVertex current;
         std::array<VertexStream,16> streams{};
         std::uint32_t layout=0,count=0,stream_count=0;
+        std::uint64_t pipeline=0;
         std::vector<std::uint32_t> indices;
         std::vector<std::uint32_t> packed;
     };
     std::vector<Draw> draws;
+    std::vector<VertexConstants> constant_snapshots;
+    std::vector<StreamDraw> stream_draws;
     unsigned draw_count=0;
     struct Surface {std::uint32_t identifier,width,height;};
     std::map<std::array<std::uint32_t,4>,Surface> targets;
+    decltype(targets)::iterator last_target=targets.end();
     struct Texture {std::uint32_t identifier,size;};
-    std::map<std::array<std::uint32_t,5>,Texture> textures;
+    using TextureKey=std::array<std::uint32_t,5>;
+    std::map<TextureKey,Texture> textures;
+    struct TextureBinding {TextureKey key;Float4 scale;std::uint32_t id;};
+    std::array<TextureBinding,4> texture_bindings{};
     struct Fence {ComPtr<ID3D11Query> query;std::uint32_t address=0,value=0;bool callback=false;};
     std::array<Fence,64> fences;
     unsigned fence_head=0,fence_count=0;
@@ -174,7 +193,7 @@ struct Gpu::Impl {
         record<<std::format("{{\"type\":\"draw\",\"draw\":{},\"command_address\":{},\"callsite\":{},\"first\":{},\"count\":{},\"target\":{},\"shader\":{},\"program_start\":{},\"primitive\":{},\"registers\":{},\"program\":{},\"constants\":{},\"current\":{},\"view\":{},\"textures\":[",
             number,json(hex32(command_address)),json(hex32(submission_callsite)),first,draw.count,target,shader,program.start,draw.state.primitive,
             json(hex_bytes(std::as_bytes(std::span(registers[0])))),json(hex_bytes(std::as_bytes(std::span(program.tokens)))),
-            json(hex_bytes(std::as_bytes(std::span(draw.constants)))),json(hex_bytes(std::as_bytes(std::span(draw.current.attributes)))),
+            json(hex_bytes(std::as_bytes(std::span(constants)))),json(hex_bytes(std::as_bytes(std::span(draw.current.attributes)))),
             json(hex_bytes(std::as_bytes(std::span(&draw.view,1)))));
         for(unsigned i=0;i<4;++i) {if(i) record<<',';record<<draw.state.textures[i];}
         record<<"],\"streams\":[";
@@ -220,8 +239,8 @@ struct Gpu::Impl {
                 capture_first_frame=statistics.flips+1;capture_active=true;
                 capture_trace.clear();capture_trace.open(capture.directory/"draws.jsonl",std::ios::binary|std::ios::trunc);
                 capture_trace.exceptions(std::ios::failbit|std::ios::badbit);
-                capture_record(std::format("{{\"type\":\"header\",\"format\":\"smbd-gpu-frame-v1\",\"source_sha256\":{},\"adapter\":{},\"frame\":{},\"resolution_scale\":{},\"antialiasing\":{},\"anisotropy\":{},\"byte_order\":\"little\",\"draw_limit\":2048,\"binary_limit\":{},\"trace_limit\":{},\"image_rgba_limit\":{}}}",
-                    json(capture_source),json(renderer.adapter()),capture_first_frame,renderer.stats().resolution_scale,renderer.stats().antialiasing,renderer.stats().anisotropy,binary_limit,text_limit,image_limit));
+                capture_record(std::format("{{\"type\":\"header\",\"format\":\"smbd-gpu-frame-v1\",\"source_sha256\":{},\"adapter\":{},\"frame\":{},\"resolution_scale\":{},\"antialiasing\":{},\"anisotropy\":{},\"unlimited_render_distance\":{},\"byte_order\":\"little\",\"draw_limit\":2048,\"binary_limit\":{},\"trace_limit\":{},\"image_rgba_limit\":{}}}",
+                    json(capture_source),json(renderer.adapter()),capture_first_frame,renderer.stats().resolution_scale,renderer.stats().antialiasing,renderer.stats().anisotropy,renderer.stats().unlimited_render_distance,binary_limit,text_limit,image_limit));
                 capture_record("{\"type\":\"initial_registers\",\"data\":"+json(hex_bytes(std::as_bytes(std::span(registers))))+'}');
                 for(unsigned i=0;i<unsigned(ShaderKind::count);++i) {
                     const auto kind=ShaderKind(i);
@@ -238,11 +257,31 @@ struct Gpu::Impl {
             object_state.emplace(object.handle,std::array<std::uint32_t,2048>{});
         }
         for(auto& attribute:current.attributes) attribute={0,0,0,1};
-        current.attributes[3]={1,1,1,1};draws.resize(256);indices.reserve(4096);inline_words.reserve(4096);
+        current.attributes[3]={1,1,1,1};draws.resize(256);stream_draws.reserve(draws.size());
+        constant_snapshots.reserve(draws.size());
+        indices.reserve(4096);inline_words.reserve(4096);
         const D3D11_QUERY_DESC description{D3D11_QUERY_EVENT,0};
         for(auto& fence:fences) checked_gpu(renderer.native_device()->CreateQuery(&description,&fence.query));
     }
     std::uint32_t reg(unsigned method) const {return registers[0][method/4];}
+    void constants_written(unsigned row,unsigned count) {
+        constant_first=std::min(constant_first,row);
+        constant_end=std::max(constant_end,row+count);
+    }
+    void write_constant(unsigned row,unsigned lane,std::uint32_t value) {
+        constants[row][lane]=real(value);
+        constants_written(row,1);
+    }
+    const VertexConstants& snapshot_constants() {
+        // Only rows written since the last draw can differ. Keep each
+        // distinct snapshot alive until the queued draws have been submitted.
+        if(constant_snapshots.empty() || (constant_first<constant_end &&
+            std::memcmp(constants.data()+constant_first,constant_snapshots.back().data()+constant_first,
+                (constant_end-constant_first)*sizeof(Float4))))
+            constant_snapshots.push_back(constants);
+        constant_first=constants.size();constant_end=0;
+        return constant_snapshots.back();
+    }
     void emit_arrays() {
         if(!array_count) return;
         const auto count=array_count;array_count=0;
@@ -254,15 +293,18 @@ struct Gpu::Impl {
     void flush() {
         if(!draw_count) return;
         PerfScope scope(renderer.performance(),PerfPhase::render);
+        stream_draws.clear();
+        const auto queued=std::span(draws).first(draw_count);
+        for(const auto& draw:queued)
+            stream_draws.push_back({draw.state,*draw.constants,draw.view,std::span(draw.streams).first(draw.stream_count),
+                draw.current,draw.layout,draw.count,draw.indices,draw.pipeline});
         renderer.begin(0,1,false);
         try {
-            for(const auto& draw:std::span(draws).first(draw_count)) {
-                renderer.draw_streams(draw.state,draw.layout,draw.constants,draw.view,
-                    std::span(draw.streams).first(draw.stream_count),draw.current,draw.count,draw.indices);
-                statistics.vertices+=draw.indices.empty()?draw.count:draw.indices.size();++statistics.draws;
-            }
-        } catch(...) {renderer.end();draw_count=0;throw;}
-        renderer.end();draw_count=0;
+            renderer.draw_streams(stream_draws);
+            for(const auto& draw:queued) statistics.vertices+=draw.indices.empty()?draw.count:draw.indices.size();
+            statistics.draws+=draw_count;
+        } catch(...) {renderer.end();draw_count=0;constant_snapshots.clear();throw;}
+        renderer.end();draw_count=0;constant_snapshots.clear();
     }
     static bool same_color(const std::array<std::uint32_t,4>& a,const std::array<std::uint32_t,4>& b) {
         return a[0]==b[0] && (a[2]&~255U)==(b[2]&~255U) && ((a[2]&15)==3)==((b[2]&15)==3) &&
@@ -287,6 +329,7 @@ struct Gpu::Impl {
     void grow_color(const std::array<std::uint32_t,4>& key,Surface& surface,std::uint32_t width,std::uint32_t height) {
         const auto old_width=surface.width,old_height=surface.height;
         flush();renderer.grow_target(surface.identifier,width,height);
+        texture_bindings={};
         for(auto& [other,image]:targets) if(same_color(key,other)) {image.width=width;image.height=height;}
         if(((key[2]>>8)&15)==1) {
             write_color(key,surface,old_width,0,width-old_width,old_height);
@@ -308,7 +351,7 @@ struct Gpu::Impl {
         auto width=type==2?1U<<((format>>16)&15):(horizontal&0xFFFF)+clip_width;
         auto height=type==2?1U<<((format>>24)&15):(vertical&0xFFFF)+clip_height;
         const std::array key{reg(0x210),reg(0x214),format,reg(0x20C)};
-        auto found=targets.find(key);
+        auto found=last_target!=targets.end() && last_target->first==key?last_target:targets.find(key);
         if(found==targets.end()) {
             std::uint32_t shared=UINT32_MAX;
             for(auto& [other,image]:targets) if(same_color(key,other)) {
@@ -318,15 +361,24 @@ struct Gpu::Impl {
             }
             flush();found=targets.emplace(key,Surface{renderer.create_target(width,height,color==3?SurfaceColor::rgb565:SurfaceColor::rgba8,
                 zeta==1?SurfaceDepth::z16:SurfaceDepth::z24s8,shared,!capture.pending),width,height}).first;
+            texture_bindings={};
         } else if(width>found->second.width || height>found->second.height) {
             flush();auto& surface=found->second;
             const auto w=std::max(width,surface.width),h=std::max(height,surface.height);
             grow_color(key,surface,w,h);
         }
+        last_target=found;
         if(target!=found->second.identifier) {flush();target=found->second.identifier;renderer.set_target(target);}
     }
     std::uint32_t texture(unsigned stage,ProgramView& view) {
         const auto method=0x1B00+stage*0x40,format=reg(method+4),image=reg(method+0x1C),pitch=reg(method+0x10)>>16;
+        const auto address=reg(method)&0x0FFFFFFF;
+        const TextureKey key{address,format,image,pitch,reg(method+0x20)};
+        auto& binding=texture_bindings[stage];
+        if(!capture_active && binding.id && binding.key==key) {
+            if(binding.scale[0]) view.texture_scales[stage]=binding.scale;
+            return binding.id;
+        }
         const auto code=(format>>8)&255;
         const bool linear=code==0x11 || code==0x12 || code==0x1E;
         const auto width=linear?image>>16:1U<<((format>>20)&15),height=linear?image&0xFFFF:1U<<((format>>24)&15);
@@ -334,18 +386,23 @@ struct Gpu::Impl {
         const auto mips=(format>>16)&15;
         if(!width || !height || width>4096 || height>4096 || !mips || depth>2048)
             throw std::runtime_error("Invalid NV097 texture dimensions");
+        const auto remember=[&](std::uint32_t id) {
+            const auto scale=linear?Float4{1.0f/width,1.0f/height,1.0f/depth,1}:Float4{};
+            binding={key,scale,id};
+            if(linear) view.texture_scales[stage]=scale;
+            return id;
+        };
         const bool cube=(format&4)!=0;
         // Sampling a GPU-produced surface must see its current GPU contents,
         // rather than the original RAM allocation used for ordinary textures.
-        if(!cube && depth==1 && mips==1) for(auto& [key,surface]:targets) {
-            const auto surface_format=key[2],surface_color=surface_format&15,surface_type=(surface_format>>8)&15;
+        if(!cube && depth==1 && mips==1) for(auto& [surface_key,surface]:targets) {
+            const auto surface_format=surface_key[2],surface_color=surface_format&15,surface_type=(surface_format>>8)&15;
             const bool matching_color=surface_color==3?(code==5 || code==0x11):(code==6 || code==7 || code==0x12 || code==0x1E);
-            if(key[0]==(reg(method)&0x0FFFFFFF) && matching_color &&
+            if(surface_key[0]==address && matching_color &&
                 ((surface.width==width && surface.height==height) || (linear && surface.width<=width && surface.height<=height)) &&
-                ((surface_type==1)==linear) && (!linear || (key[3]&0xFFFF)==pitch)) {
-                if(surface.width!=width || surface.height!=height) grow_color(key,surface,width,height);
-                if(linear) view.texture_scales[stage]={1.0f/width,1.0f/height,1,1};
-                return surface.identifier;
+                ((surface_type==1)==linear) && (!linear || (surface_key[3]&0xFFFF)==pitch)) {
+                if(surface.width!=width || surface.height!=height) grow_color(surface_key,surface,width,height);
+                return remember(surface.identifier);
             }
         }
         unsigned bpp=0,block=0;
@@ -359,8 +416,6 @@ struct Gpu::Impl {
         }
         if(cube) size=cubemap_face_size(size)*6;
         if(!size || size>64*1024*1024) throw std::runtime_error("NV097 texture payload exceeds its bound");
-        const auto address=reg(method)&0x0FFFFFFF;
-        const std::array key{address,format,image,pitch,reg(method+0x20)};
         auto found=textures.find(key);
         if(found==textures.end()) {
             const auto id=renderer.upload({width,height,static_cast<TextureFormat>(code),
@@ -376,8 +431,7 @@ struct Gpu::Impl {
             capture_record(std::format("{{\"type\":\"texture\",\"resource\":{},\"address\":{},\"width\":{},\"height\":{},\"depth\":{},\"format\":{},\"mips\":{},\"pitch\":{},\"cubemap\":{},\"size\":{},\"guest_data\":{}}}",
                 id,json(hex32(address)),width,height,depth,code,mips,linear?pitch:0,cube,size,data));
         });
-        if(linear) view.texture_scales[stage]={1.0f/width,1.0f/height,1.0f/depth,1};
-        return id;
+        return remember(id);
     }
     RenderState state(ProgramView& view) {
         auto s=gpu_render_state(registers[0],primitive);
@@ -393,7 +447,7 @@ struct Gpu::Impl {
         // Reserve the next batch slot only after that binding has completed.
         const auto render_state=state(view);
         auto& draw=draws[draw_count];draw.stream_count=0;draw.view=view;draw.packed.clear();
-        draw.current=current;draw.constants=constants;draw.count=count;draw.state=render_state;
+        draw.current=current;draw.count=count;draw.state=render_state;
         // A program handle remains valid until its instruction memory or entry
         // changes. Ordinary constants and vertex streams do not change shaders.
         std::uint32_t shader;
@@ -419,7 +473,8 @@ struct Gpu::Impl {
         if(inlined) {
             if(!inline_stride || inline_words.size()*4!=std::size_t(count)*inline_stride)
                 throw std::runtime_error("NV097 inline vertex payload differs from its layout");
-            draw.packed=inline_words;draw.stream_count=1;
+            // End consumes this payload. The queued draw owns it until upload.
+            draw.packed.swap(inline_words);draw.stream_count=1;
             draw.streams[0]={std::as_bytes(std::span(draw.packed)),inline_stride};
         }
         for(unsigned stream=0;!inlined && stream<draw.stream_count;++stream) {
@@ -430,9 +485,10 @@ struct Gpu::Impl {
             if(address>UINT32_MAX || size>8*1024*1024) throw std::runtime_error("NV097 vertex stream exceeds its bound");
             draw.streams[stream]={Bytes(static_cast<const std::byte*>(memory.access(static_cast<std::uint32_t>(address),static_cast<std::size_t>(size))),static_cast<std::size_t>(size)),strides[stream]};
         }
-        draw.layout=renderer.prepare_layout(shader,layout);renderer.prepare(draw.state);
-        if(capture_active) capture_try([&] {capture_draw(first,draw,shader,layout,bases,inlined,elements);});
+        draw.layout=renderer.prepare_layout(shader,layout);draw.pipeline=renderer.prepare(draw.state);
         draw.indices.assign(elements.begin(),elements.end());
+        if(capture_active) capture_try([&] {capture_draw(first,draw,shader,layout,bases,inlined,elements);});
+        draw.constants=&snapshot_constants();
         if(++draw_count==draws.size()) flush();
     }
     void blit(const std::array<std::uint32_t,2048>& state,std::uint32_t size) {
@@ -582,9 +638,16 @@ struct Gpu::Impl {
             if(!array_count) {array_first=data&0xFFFFFF;array_command=command_address;array_callsite=submission_callsite;}
             array_count+=count;
         }
-        else if(method==0x1800) {indices.push_back(data&0xFFFF);indices.push_back(data>>16);}
-        else if(method==0x1808) indices.push_back(data);
-        else if(method==0x1818) inline_words.push_back(data);
+        else if(method==0x1800 || method==0x1808) {
+            const bool packed=method==0x1800;
+            if(indices.size()>max_elements-(packed?2:1)) throw std::runtime_error("NV097 inline draw exceeds its bound");
+            if(packed) indices.push_back(data&0xFFFF);
+            indices.push_back(packed?data>>16:data);
+        }
+        else if(method==0x1818) {
+            if(inline_words.size()>=max_inline_words) throw std::runtime_error("NV097 inline draw exceeds its bound");
+            inline_words.push_back(data);
+        }
         else if(method>=0x1880 && method<=0x18FC) {
             const auto attribute=(method-0x1880)/8,lane=((method-0x1880)/4)%2;
             if(!lane) current.attributes[attribute]={real(data),0,0,1};else current.attributes[attribute][1]=real(data);
@@ -597,20 +660,20 @@ struct Gpu::Impl {
             current.attributes[attribute][lane]=float(static_cast<std::int16_t>(data));
             current.attributes[attribute][lane+1]=float(static_cast<std::int16_t>(data>>16));
         } else if(method>=0x1A00 && method<=0x1AFC) current.attributes[(method-0x1A00)/16][((method-0x1A00)/4)%4]=real(data);
-        else if(method>=0x440 && method<=0x47C) constants[4+(method-0x440)/16][((method-0x440)/4)%4]=real(data);
+        else if(method>=0x440 && method<=0x47C) write_constant(4+(method-0x440)/16,((method-0x440)/4)%4,data);
         else if(method>=0x480 && method<=0x57C) {
-            const auto index=(method-0x480)/4;constants[8+(index/16)*8+(index%16)/4][index%4]=real(data);
+            const auto index=(method-0x480)/4;write_constant(8+(index/16)*8+(index%16)/4,index%4,data);
         } else if(method>=0x580 && method<=0x67C) {
-            const auto index=(method-0x580)/4;constants[12+(index/16)*8+(index%16)/4][index%4]=real(data);
-        } else if(method>=0x680 && method<=0x6BC) constants[(method-0x680)/16][((method-0x680)/4)%4]=real(data);
+            const auto index=(method-0x580)/4;write_constant(12+(index/16)*8+(index%16)/4,index%4,data);
+        } else if(method>=0x680 && method<=0x6BC) write_constant((method-0x680)/16,((method-0x680)/4)%4,data);
         else if(method>=0x6C0 && method<=0x7BC) {
-            const auto index=(method-0x6C0)/4;constants[68+(index/16)*8+(index%16)/4][index%4]=real(data);
+            const auto index=(method-0x6C0)/4;write_constant(68+(index/16)*8+(index%16)/4,index%4,data);
         } else if(method>=0x840 && method<=0x93C) {
-            const auto index=(method-0x840)/4;constants[64+(index/16)*8+(index%16)/4][index%4]=real(data);
-        } else if(method>=0x9D0 && method<=0x9DC) constants[57][(method-0x9D0)/4]=real(data);
-        else if(method>=0xA50 && method<=0xA5C) constants[56][(method-0xA50)/4]=real(data);
-        else if(method>=0xA20 && method<=0xA2C) constants[59][(method-0xA20)/4]=real(data);
-        else if(method>=0xAF0 && method<=0xAFC) constants[58][(method-0xAF0)/4]=real(data);
+            const auto index=(method-0x840)/4;write_constant(64+(index/16)*8+(index%16)/4,index%4,data);
+        } else if(method>=0x9D0 && method<=0x9DC) write_constant(57,(method-0x9D0)/4,data);
+        else if(method>=0xA50 && method<=0xA5C) write_constant(56,(method-0xA50)/4,data);
+        else if(method>=0xA20 && method<=0xA2C) write_constant(59,(method-0xA20)/4,data);
+        else if(method>=0xAF0 && method<=0xAFC) write_constant(58,(method-0xAF0)/4,data);
         else if(method==0x1E9C) program_load=data;
         else if(method==0x1EA0) {
             if(program.start!=data) prepared_program=0;
@@ -624,7 +687,7 @@ struct Gpu::Impl {
             program.tokens[program_load][lane]=data;if(lane==3) ++program_load;
         } else if(method>=0xB80 && method<=0xBFC) {
             if(constant_load>=constants.size()) throw std::runtime_error("NV097 constant upload outside context memory");
-            const auto lane=((method-0xB80)/4)%4;constants[constant_load][lane]=real(data);if(lane==3) ++constant_load;
+            const auto lane=((method-0xB80)/4)%4;write_constant(constant_load,lane,data);if(lane==3) ++constant_load;
         } else if(method==0x1E90) {
             flush();auto launch=program;launch.start=data;ProgramVertex input{};
             for(unsigned lane=0;lane<4;++lane) input.attributes[0][lane]=real(reg(0x1E80+lane*4));
@@ -657,7 +720,6 @@ struct Gpu::Impl {
             if(capture.pending) capture_flip();
             if(owner.flip) owner.flip();
         }
-        if(indices.size()>32768 || inline_words.size()>2*1024*1024) throw std::runtime_error("NV097 inline draw exceeds its bound");
     }
 };
 Gpu::Gpu(Renderer& renderer,Memory& memory,std::uint32_t semaphore_base,std::span<const GraphicsObject> profile):impl_(std::make_unique<Impl>(renderer,memory,*this,semaphore_base,profile)) {}
@@ -679,6 +741,8 @@ void Gpu::invalidate_memory(std::uint32_t address,std::uint32_t size) {
        !std::ranges::any_of(g.targets,affected)) return;
     // Submit every queued use of the old views before releasing or recycling them.
     g.emit_arrays();g.flush();
+    g.texture_bindings={};
+    g.last_target=g.targets.end();
     const auto retired=[&](std::uint32_t id) {
         if(g.capture_active) g.capture_try([&] {g.capture_record(std::format("{{\"type\":\"release\",\"resource\":{}}}",id));});
     };
@@ -727,45 +791,58 @@ void Gpu::submit(std::uint32_t begin,std::uint32_t end,std::uint32_t callsite) {
         const auto header=load(begin);begin+=4;++g.statistics.packets;
         if(header&0xA0030003U) throw std::runtime_error(std::format("Unsupported NV2A packet 0x{:08X} at 0x{:08X}",header,begin-4));
         const auto count=(header>>18)&0x7FF,first=header&0x1FFC,subchannel=(header>>13)&7;
-        if(count>(end-begin)/4 || (!(header&0x40000000U) && count && first+(count-1)*4>=0x2000))
+        if(!count) continue;
+        const auto method_step=(header&0x40000000U)?0U:4U;
+        const auto last=first+(count-1)*method_step;
+        const auto bytes=count*4;
+        if(bytes>end-begin || last>=0x2000)
             throw std::runtime_error("NV2A packet extends beyond its submission or method bank");
-        // These aligned packets upload whole rows; dispatching each word repeats
-        // the same state checks and address conversions up to 32 times.
-        if(!subchannel && g.classes[0]==0x97 && !(header&0x40000000U) &&
-           count && count<=32 && !(count&3) && (first==0xB00 || first==0xB80)) {
-            const bool code=first==0xB00;
-            auto& load=code?g.program_load:g.constant_load;
-            const auto capacity=code?g.program.tokens.size():g.constants.size();
-            if(load<capacity && count/4<=capacity-load) {
-                if(g.array_count) g.emit_arrays();
-                const auto bytes=count*4;
-                const auto* source=commands+(begin-source_begin);
-                std::memcpy(g.registers[0].data()+first/4,source,bytes);
-                if(code) {
-                    auto* destination=g.program.tokens.data()+load;
-                    if(std::memcmp(destination,source,bytes)) g.prepared_program=0;
-                    std::memcpy(destination,source,bytes);
-                }
-                else std::memcpy(g.constants.data()+load,source,bytes);
-                load+=count/4;g.statistics.methods+=count;
+        if(std::endian::native==std::endian::little && !subchannel && g.classes[0]==0x97) {
+            const auto* source=commands+(begin-source_begin);
+            const auto finish_packet=[&] {
+                g.statistics.methods+=count;
                 if(g.capture_active) g.command_address=begin+bytes-4;
-                begin+=bytes;continue;
+                begin+=bytes;
+            };
+            if(register_packet(first,last)) {
+                if(g.array_count) g.emit_arrays();
+                if(!method_step || count==1) g.registers[0][first/4]=load(begin+bytes-4);
+                else std::memcpy(g.registers[0].data()+first/4,source,bytes);
+                finish_packet();continue;
+            }
+            // Aligned program and constant packets upload whole rows.
+            if(method_step && count<=32 && !(count&3) && (first==0xB00 || first==0xB80)) {
+                const bool code=first==0xB00;
+                auto& row=code?g.program_load:g.constant_load;
+                const auto capacity=code?g.program.tokens.size():g.constants.size();
+                if(row<capacity && count/4<=capacity-row) {
+                    if(g.array_count) g.emit_arrays();
+                    std::memcpy(g.registers[0].data()+first/4,source,bytes);
+                    if(code) {
+                        auto* destination=g.program.tokens.data()+row;
+                        if(std::memcmp(destination,source,bytes)) {
+                            g.prepared_program=0;
+                            std::memcpy(destination,source,bytes);
+                        }
+                    } else {
+                        std::memcpy(g.constants.data()+row,source,bytes);
+                        g.constants_written(row,count/4);
+                    }
+                    row+=count/4;
+                    finish_packet();continue;
+                }
+            }
+            if(!method_step && first==0x1818 && g.inline_words.size()+count<=max_inline_words) {
+                if(g.array_count) g.emit_arrays();
+                const auto previous=g.inline_words.size();
+                g.inline_words.resize(previous+count);
+                std::memcpy(g.inline_words.data()+previous,source,bytes);
+                g.registers[0][first/4]=load(begin+bytes-4);
+                finish_packet();continue;
             }
         }
-        if(std::endian::native==std::endian::little && !subchannel && g.classes[0]==0x97 &&
-           (header&0x40000000U) && first==0x1818 && count &&
-           g.inline_words.size()+count<=2*1024*1024 && g.indices.size()<=32768) {
-            if(g.capture_active) g.command_address=begin;
-            if(g.array_count) g.emit_arrays();
-            const auto previous=g.inline_words.size();const auto bytes=count*4;
-            g.inline_words.resize(previous+count);
-            std::memcpy(g.inline_words.data()+previous,commands+(begin-source_begin),bytes);
-            g.registers[0][first/4]=load(begin+bytes-4);g.statistics.methods+=count;
-            if(g.capture_active) g.command_address=begin+bytes-4;
-            begin+=bytes;continue;
-        }
-        for(unsigned word=0;word<count;++word) {
-            const auto method=first+((header&0x40000000U)?0:word*4);
+        const auto packet_end=begin+bytes;
+        for(auto method=first;begin<packet_end;method+=method_step) {
             if(g.capture_active) g.command_address=begin;
             g.method(subchannel,method,load(begin));begin+=4;
         }
@@ -989,16 +1066,24 @@ std::string Gpu::check_texture_cache() {
     }
     expect("64 unload/reload cycles preserve pixels and reuse GPU slots",cycles && renderer.stats().texture_slots==2 && renderer.stats().texture_bytes==256);
     gpu.invalidate_memory(0x4000,256);
+    reg(0x1B00)=0x6000;
+    const auto ram_view=g.texture(0,view);
     reg(0x200)=reg(0x204)=8U<<16;reg(0x208)=0x128;reg(0x20C)=32U|(32U<<16);reg(0x210)=0x6000;reg(0x214)=0x7000;
     g.select_target();renderer.clear(0xFF112233);
+    const auto target_view=g.texture(0,view);
+    ProgramView rebound;
+    expect("a newly created GPU target replaces the cached RAM binding and retains its coordinate scale",
+        target_view!=ram_view && target_view==g.target && g.texture(0,rebound)==target_view &&
+        rebound.texture_scales[0]==Float4{0.125f,0.125f,1,1});
     reg(0x214)=0x8000;g.select_target();const auto shared=g.target;
     expect("shared color storage is counted once",renderer.stats().target_bytes==8*8*20);
     gpu.invalidate_memory(0x80007000,256);
     const auto image=renderer.readback();const auto pixel=(4*8+4)*4;
-    expect("retiring one depth allocation preserves its live color alias",g.targets.size()==1 && g.target==shared &&
+    expect("retiring one depth allocation preserves its live color alias",g.targets.size()==1 && g.target==shared && g.texture(0,view)==shared &&
         image.rgba[pixel]==std::byte{0x11} && image.rgba[pixel+1]==std::byte{0x22} && image.rgba[pixel+2]==std::byte{0x33});
     gpu.invalidate_memory(0x6000,256);
     expect("retiring target storage frees its view and restores the main target",g.targets.empty() && !g.target && renderer.stats().target_bytes==8*8*8);
+    reg(0x1B00)=0x80004000;
     memory.fill_elements<std::uint32_t>(0x4000,0xFF0000FF,64,false);
     expect("a retired target slot can hold an ordinary texture",sample(g.texture(0,view))==0x0000FF);
     const TextureData data{8,8,TextureFormat::argb8_linear,Bytes(ram).subspan(0x4000,256),1,32};
@@ -1062,6 +1147,25 @@ std::string Gpu::check_texture_cache() {
             g.constant_load==expected_constant_load && g.statistics.methods==expected_methods;
     }
     expect("bulk shader uploads match scalar processing, including partial rows and bounds failures",uploads_match);
+    const auto saved_constants=g.constants;
+    const auto saved_constant_load=g.constant_load;
+    g.method(0,0xAF0,0);
+    const auto& original_constants=g.snapshot_constants();
+    g.method(0,0xAF0,0x80000000U);
+    const auto& changed=g.snapshot_constants();
+    g.method(0,0xAF0,0);g.method(0,0xAF0,0x80000000U);
+    const bool reused=&g.snapshot_constants()==&changed;
+    constexpr std::array rows{0x00100B80U,0x7FC12345U,0x80000000U,0U,0U};
+    for(unsigned i=0;i<rows.size();++i) memory.store<std::uint32_t>(0x1000+i*4,rows[i]);
+    g.constant_load=191;gpu.submit(0x1000,0x1000+rows.size()*4);
+    const auto& uploaded=g.snapshot_constants();
+    g.constant_load=191;gpu.submit(0x1000,0x1000+rows.size()*4);
+    expect("constant snapshots preserve queued bytes and share repeated scalar and packet values",
+        reused && &uploaded==&g.snapshot_constants() && &uploaded!=&changed &&
+        std::bit_cast<std::uint32_t>(original_constants[58][0])==0 &&
+        std::bit_cast<std::uint32_t>(changed[58][0])==0x80000000U &&
+        std::bit_cast<std::uint32_t>(uploaded[191][0])==rows[1]);
+    g.constant_snapshots.clear();g.constants=saved_constants;g.constant_load=saved_constant_load;
     memory.map(0x80001000U,std::span(ram).subspan(0x1000));
     bool inline_match=true;
     const auto registers=g.registers[0];const auto methods=g.statistics.methods;
@@ -1084,6 +1188,29 @@ std::string Gpu::check_texture_cache() {
     }
     g.inline_words.clear();
     expect("inline vertex packets match scalar processing, including RAM aliases and maximum packet size",inline_match);
+    bool registers_match=true;
+    struct RegisterUpload {unsigned first,count;bool repeat;};
+    constexpr RegisterUpload register_uploads[]={{0x260,8,false},{0x9C0,3,false},{0xA60,32,false},
+        {0x1760,16,false},{0x181C,3,false},{0x1B00,8,true},{0x1E40,9,false},{0x43C,2,false},{0x17F8,2,false}};
+    for(const auto upload:register_uploads) {
+        const auto registers=g.registers[0];const auto constants=g.constants;
+        const auto methods=g.statistics.methods;const auto primitive=g.primitive;
+        memory.store<std::uint32_t>(0x1000,(upload.count<<18)|upload.first|(upload.repeat?0x40000000U:0));
+        for(unsigned i=0;i<upload.count;++i) {
+            const auto method=upload.first+(upload.repeat?0:i*4);
+            const auto data=method==0x17FC?6U:0x7F800001U+i;
+            memory.store<std::uint32_t>(0x1004+i*4,data);
+            g.method(0,method,data);
+        }
+        const auto expected_registers=g.registers[0];const auto expected_constants=g.constants;
+        const auto expected_primitive=g.primitive;
+        g.registers[0]=registers;g.constants=constants;g.statistics.methods=methods;g.primitive=primitive;
+        gpu.submit(0x80001000U,0x80001004U+upload.count*4);
+        registers_match&=g.registers[0]==expected_registers && g.primitive==expected_primitive &&
+            !std::memcmp(&g.constants,&expected_constants,sizeof(g.constants)) && g.statistics.methods==methods+upload.count;
+        g.registers[0]=registers;g.constants=constants;g.primitive=primitive;
+    }
+    expect("register packets match scalar writes and stop at methods with side effects",registers_match);
     // A 4x4 + 2x2 ARGB mip chain occupies 80 bytes, but each Xbox cube face
     // starts 128 bytes after the previous one. Give padding a distinct colour.
     memory.fill_elements<std::uint32_t>(0x6000,0xFF123456,6*128/4,false);
